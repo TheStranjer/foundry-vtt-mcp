@@ -116,6 +116,67 @@ The exact field structure depends on the game system. Use the get_* tools first 
   },
 };
 
+// Tool definition for creating documents
+const createDocumentTool = {
+  name: "create_document",
+  description: `Create a new document in FoundryVTT. IMPORTANT: Before using this tool, you should first retrieve an existing document of the same type using the appropriate get_* tool (e.g., get_actor, get_item) to understand the expected schema and field structure. Document schemas vary significantly by game system, so inspecting an existing document first ensures you provide the correct fields when creating a new one.`,
+  inputSchema: {
+    type: "object",
+    properties: {
+      type: {
+        type: "string",
+        description: `The document type to create. Valid types include: "Actor", "Item", "Scene", "JournalEntry", "Folder", "User", "Playlist", "Macro", "RollTable", "Cards", "ChatMessage", "Combat", "Combatant", "ActiveEffect", "Drawing", "MeasuredTemplate", "Note", "Tile", "Token", "Wall", "AmbientLight", "AmbientSound". The type must match Foundry's internal document class name (case-sensitive).`,
+      },
+      data: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: true,
+        },
+        description: `An array of data objects defining the new documents to create. Each object should contain all required fields for the document type. At minimum, most documents require a "name" field.
+
+Example: To create a simple Item:
+[{ "name": "Healing Potion", "type": "consumable" }]
+
+Example: To create an Actor with some system data:
+[{ "name": "Goblin", "type": "npc", "system": { "attributes": { "hp": { "value": 10, "max": 10 } } } }]
+
+The exact field structure depends on the game system. Use the get_* tools first to retrieve an existing document of the same type to understand the expected schema.`,
+      },
+    },
+    required: ["type", "data"],
+  },
+};
+
+// Tool definition for deleting documents
+const deleteDocumentTool = {
+  name: "delete_document",
+  description: `Delete one or more documents in FoundryVTT. This action is permanent and cannot be undone. Use with caution.`,
+  inputSchema: {
+    type: "object",
+    properties: {
+      type: {
+        type: "string",
+        description: `The document type to delete. Valid types include: "Actor", "Item", "Scene", "JournalEntry", "Folder", "User", "Playlist", "Macro", "RollTable", "Cards", "ChatMessage", "Combat", "Combatant", "ActiveEffect", "Drawing", "MeasuredTemplate", "Note", "Tile", "Token", "Wall", "AmbientLight", "AmbientSound". The type must match Foundry's internal document class name (case-sensitive).`,
+      },
+      ids: {
+        type: "array",
+        items: {
+          type: "string",
+        },
+        description: `An array of document _ids to delete. Each _id is the unique identifier for a document in FoundryVTT.
+
+Example: To delete a single document:
+["vlcf6AI5FaE9qjgJ"]
+
+Example: To delete multiple documents:
+["vlcf6AI5FaE9qjgJ", "abc123def456", "xyz789ghi012"]`,
+      },
+    },
+    required: ["type", "ids"],
+  },
+};
+
 // Create server instance
 const server = new Server(
   {
@@ -137,6 +198,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       generateGetToolDefinition(config),
     ]),
     modifyDocumentTool,
+    createDocumentTool,
+    deleteDocumentTool,
   ];
 
   return { tools };
@@ -242,6 +305,50 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     } catch (error) {
       return errorResponse(
         `Error modifying document: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  // Handle create_document
+  if (name === "create_document") {
+    try {
+      const type = args?.type as string | undefined;
+      const data = args?.data as Record<string, unknown>[] | undefined;
+
+      if (!type) {
+        return errorResponse("Error: 'type' is required");
+      }
+      if (!data || !Array.isArray(data)) {
+        return errorResponse("Error: 'data' must be an array of objects");
+      }
+
+      const result = await foundryClient.createDocument(type, data);
+      return successResponse(result);
+    } catch (error) {
+      return errorResponse(
+        `Error creating document: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  // Handle delete_document
+  if (name === "delete_document") {
+    try {
+      const type = args?.type as string | undefined;
+      const ids = args?.ids as string[] | undefined;
+
+      if (!type) {
+        return errorResponse("Error: 'type' is required");
+      }
+      if (!ids || !Array.isArray(ids) || ids.length === 0) {
+        return errorResponse("Error: 'ids' must be a non-empty array of strings");
+      }
+
+      const result = await foundryClient.deleteDocument(type, ids);
+      return successResponse(result);
+    } catch (error) {
+      return errorResponse(
+        `Error deleting document: ${error instanceof Error ? error.message : String(error)}`
       );
     }
   }

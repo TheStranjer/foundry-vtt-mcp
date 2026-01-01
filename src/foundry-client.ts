@@ -639,6 +639,186 @@ export class FoundryClient {
     });
   }
 
+  /**
+   * Create a new document in FoundryVTT
+   * @param type - The document type (Actor, Item, Scene, JournalEntry, Folder, User, etc.)
+   * @param data - Array of data objects defining the new documents to create.
+   *               Each object should contain the fields for the new document.
+   *               The exact field structure depends on the game system - consider using get_* tools
+   *               first to retrieve an existing document of the same type to understand the schema.
+   * @returns The result from Foundry containing the created document data
+   */
+  async createDocument(
+    type: string,
+    data: Record<string, unknown>[]
+  ): Promise<Record<string, unknown>> {
+    if (!this.connection || this.connection.ws.readyState !== WebSocket.OPEN) {
+      throw new Error("Not connected to Foundry server");
+    }
+
+    const ws = this.connection.ws;
+    const ackId = this.messageCounter++;
+
+    const payload = [
+      "modifyDocument",
+      {
+        type,
+        action: "create",
+        operation: {
+          parent: null,
+          pack: null,
+          data,
+          action: "create",
+          modifiedTime: Date.now(),
+          renderSheet: true,
+          render: true,
+        },
+      },
+    ];
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        ws.off("message", messageHandler);
+        reject(new Error(`Timeout waiting for createDocument response (30s) for ${type}`));
+      }, 30000);
+
+      const messageHandler = (data: WebSocket.Data) => {
+        const message = data.toString();
+
+        // Look for Socket.IO ack response: 43{id}[...]
+        if (message.startsWith("43")) {
+          try {
+            // Find where the JSON array starts
+            const jsonStart = message.indexOf("[");
+            if (jsonStart === -1) return;
+
+            const jsonPart = message.slice(jsonStart);
+            const responseArray = JSON.parse(jsonPart) as unknown[];
+
+            if (!Array.isArray(responseArray) || responseArray.length === 0) {
+              return;
+            }
+
+            const responseData = responseArray[0] as Record<string, unknown>;
+
+            // Check if this response matches our request by type and action
+            if (responseData.type !== type || responseData.action !== "create") {
+              return;
+            }
+
+            // This is our response
+            clearTimeout(timeout);
+            ws.off("message", messageHandler);
+            resolve(responseData);
+          } catch (error) {
+            // Parse error, not our message, continue waiting
+          }
+        }
+      };
+
+      ws.on("message", messageHandler);
+
+      // Send the createDocument request
+      const messageStr = `42${ackId}${JSON.stringify(payload)}`;
+      console.error(`[FoundryClient] Sending createDocument: ${messageStr}`);
+      ws.send(messageStr);
+    });
+  }
+
+  /**
+   * Delete a document in FoundryVTT
+   * @param type - The document type (Actor, Item, Scene, JournalEntry, Folder, User, etc.)
+   * @param ids - Array of document _ids to delete
+   * @returns The result from Foundry containing the deleted document IDs
+   */
+  async deleteDocument(
+    type: string,
+    ids: string[]
+  ): Promise<Record<string, unknown>> {
+    if (!this.connection || this.connection.ws.readyState !== WebSocket.OPEN) {
+      throw new Error("Not connected to Foundry server");
+    }
+
+    const ws = this.connection.ws;
+    const ackId = this.messageCounter++;
+
+    const payload = [
+      "modifyDocument",
+      {
+        type,
+        action: "delete",
+        operation: {
+          parent: null,
+          pack: null,
+          ids,
+          action: "delete",
+          modifiedTime: Date.now(),
+          deleteAll: false,
+          render: true,
+        },
+      },
+    ];
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        ws.off("message", messageHandler);
+        reject(new Error(`Timeout waiting for deleteDocument response (30s) for ${type}`));
+      }, 30000);
+
+      const messageHandler = (data: WebSocket.Data) => {
+        const message = data.toString();
+
+        // Look for Socket.IO ack response: 43{id}[...]
+        if (message.startsWith("43")) {
+          try {
+            // Find where the JSON array starts
+            const jsonStart = message.indexOf("[");
+            if (jsonStart === -1) return;
+
+            const jsonPart = message.slice(jsonStart);
+            const responseArray = JSON.parse(jsonPart) as unknown[];
+
+            if (!Array.isArray(responseArray) || responseArray.length === 0) {
+              return;
+            }
+
+            const responseData = responseArray[0] as Record<string, unknown>;
+
+            // Check if this response matches our request by type and action
+            if (responseData.type !== type || responseData.action !== "delete") {
+              return;
+            }
+
+            // Check if the result contains at least one of our requested IDs
+            const result = responseData.result as string[] | undefined;
+            if (!result || !Array.isArray(result)) {
+              return;
+            }
+
+            const hasMatchingId = ids.some((id) => result.includes(id));
+            if (!hasMatchingId) {
+              return;
+            }
+
+            // This is our response
+            clearTimeout(timeout);
+            ws.off("message", messageHandler);
+            resolve(responseData);
+          } catch (error) {
+            // Parse error, not our message, continue waiting
+          }
+        }
+      };
+
+      ws.on("message", messageHandler);
+
+      // Send the deleteDocument request
+      const messageStr = `42${ackId}${JSON.stringify(payload)}`;
+      console.error(`[FoundryClient] Sending deleteDocument: ${messageStr}`);
+      ws.send(messageStr);
+    });
+  }
+
   // Convenience methods for specific document types
   async getActors(options?: { maxLength?: number | null; requestedFields?: string[] | null }) {
     return this.getDocuments("actors", options);
