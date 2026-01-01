@@ -402,22 +402,16 @@ export class FoundryClient {
   }
 
   /**
-   * Request actors from the world
-   * @param options.maxLength - Maximum bytes for the JSON response; actors removed until under limit
-   * @param options.requestedFields - Array of field names to include (always includes _id and name)
-   * @returns Array of actor objects
+   * Request world data from Foundry
+   * This is the generic method that handles the WebSocket communication pattern.
+   * @returns The full world data response object
    */
-  async getActors(options?: {
-    maxLength?: number | null;
-    requestedFields?: string[] | null;
-  }): Promise<Record<string, unknown>[]> {
+  async requestWorldData(): Promise<Record<string, unknown>> {
     if (!this.connection || this.connection.ws.readyState !== WebSocket.OPEN) {
       throw new Error("Not connected to Foundry server");
     }
 
     const ws = this.connection.ws;
-    const maxLength = options?.maxLength ?? 0;
-    const requestedFields = options?.requestedFields ?? null;
 
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -444,22 +438,7 @@ export class FoundryClient {
             }
 
             const responseData = responseArray[0] as Record<string, unknown>;
-            const actors = responseData.actors as Record<string, unknown>[] | undefined;
-
-            if (!actors || !Array.isArray(actors)) {
-              reject(new Error("Response does not contain actors array"));
-              return;
-            }
-
-            // Filter fields for each actor
-            let filteredActors = actors.map((actor) =>
-              this.filterActorFields(actor, requestedFields)
-            );
-
-            // Truncate if needed
-            filteredActors = this.truncateActors(filteredActors, maxLength);
-
-            resolve(filteredActors);
+            resolve(responseData);
           } catch (error) {
             reject(new Error(`Failed to parse world response: ${error}`));
           }
@@ -469,9 +448,80 @@ export class FoundryClient {
       ws.on("message", messageHandler);
 
       // Send the world request
-      console.error("[FoundryClient] Requesting world data for actors...");
+      console.error("[FoundryClient] Requesting world data...");
       ws.send('420["world"]');
     });
+  }
+
+  /**
+   * Request actors from the world
+   * @param options.maxLength - Maximum bytes for the JSON response; actors removed until under limit
+   * @param options.requestedFields - Array of field names to include (always includes _id and name)
+   * @returns Array of actor objects
+   */
+  async getActors(options?: {
+    maxLength?: number | null;
+    requestedFields?: string[] | null;
+  }): Promise<Record<string, unknown>[]> {
+    const maxLength = options?.maxLength ?? 0;
+    const requestedFields = options?.requestedFields ?? null;
+
+    const worldData = await this.requestWorldData();
+    const actors = worldData.actors as Record<string, unknown>[] | undefined;
+
+    if (!actors || !Array.isArray(actors)) {
+      throw new Error("Response does not contain actors array");
+    }
+
+    // Filter fields for each actor
+    let filteredActors = actors.map((actor) =>
+      this.filterActorFields(actor, requestedFields)
+    );
+
+    // Truncate if needed
+    filteredActors = this.truncateActors(filteredActors, maxLength);
+
+    return filteredActors;
+  }
+
+  /**
+   * Request a specific actor by id, _id, or name
+   * @param identifier - The id, _id, or name of the actor to find
+   * @param options.requestedFields - Array of field names to include (always includes _id and name)
+   * @returns The actor object or null if not found
+   */
+  async getActor(
+    identifier: { id?: string; _id?: string; name?: string },
+    options?: {
+      requestedFields?: string[] | null;
+    }
+  ): Promise<Record<string, unknown> | null> {
+    const requestedFields = options?.requestedFields ?? null;
+
+    const worldData = await this.requestWorldData();
+    const actors = worldData.actors as Record<string, unknown>[] | undefined;
+
+    if (!actors || !Array.isArray(actors)) {
+      throw new Error("Response does not contain actors array");
+    }
+
+    // Find the actor by id, _id, or name
+    let actor: Record<string, unknown> | undefined;
+
+    if (identifier.id) {
+      actor = actors.find((a) => a.id === identifier.id || a._id === identifier.id);
+    } else if (identifier._id) {
+      actor = actors.find((a) => a._id === identifier._id || a.id === identifier._id);
+    } else if (identifier.name) {
+      actor = actors.find((a) => a.name === identifier.name);
+    }
+
+    if (!actor) {
+      return null;
+    }
+
+    // Filter fields
+    return this.filterActorFields(actor, requestedFields);
   }
 
   /**

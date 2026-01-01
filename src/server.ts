@@ -48,6 +48,34 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: [],
         },
       },
+      {
+        name: "get_actor",
+        description: "Get a specific actor from FoundryVTT by id, _id, or name",
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: {
+              type: "string",
+              description: "The id of the actor to retrieve",
+            },
+            _id: {
+              type: "string",
+              description: "The _id of the actor to retrieve",
+            },
+            name: {
+              type: "string",
+              description: "The name of the actor to retrieve",
+            },
+            requested_fields: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "Array of field names to include in the actor object. Always includes _id and name. If empty, undefined, or null, all fields are included.",
+            },
+          },
+          required: [],
+        },
+      },
     ],
   };
 });
@@ -92,6 +120,74 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           {
             type: "text",
             text: `Error fetching actors: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+
+  if (name === "get_actor") {
+    if (!foundryClient.isConnected()) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: Not connected to FoundryVTT server",
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    try {
+      const id = args?.id as string | undefined;
+      const _id = args?._id as string | undefined;
+      const actorName = args?.name as string | undefined;
+      const requestedFields = args?.requested_fields as string[] | undefined;
+
+      if (!id && !_id && !actorName) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Error: Must provide at least one of: id, _id, or name",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const actor = await foundryClient.getActor(
+        { id, _id, name: actorName },
+        { requestedFields: requestedFields || null }
+      );
+
+      if (!actor) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Actor not found",
+            },
+          ],
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(actor),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching actor: ${error instanceof Error ? error.message : String(error)}`,
           },
         ],
         isError: true,
