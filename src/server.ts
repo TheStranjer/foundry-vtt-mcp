@@ -80,6 +80,42 @@ function generateGetToolDefinition(config: DocumentTypeConfig) {
   };
 }
 
+// Tool definition for modifying documents
+const modifyDocumentTool = {
+  name: "modify_document",
+  description: `Modify a document in FoundryVTT. IMPORTANT: Before using this tool, you should first retrieve the document using the appropriate get_* tool (e.g., get_actor, get_item) to understand its current structure and field names. Document schemas vary by game system, so inspecting the document first ensures you use the correct field paths in your updates.`,
+  inputSchema: {
+    type: "object",
+    properties: {
+      type: {
+        type: "string",
+        description: `The document type to modify. Valid types include: "Actor", "Item", "Scene", "JournalEntry", "Folder", "User", "Playlist", "Macro", "RollTable", "Cards", "ChatMessage", "Combat", "Combatant", "ActiveEffect", "Drawing", "MeasuredTemplate", "Note", "Tile", "Token", "Wall", "AmbientLight", "AmbientSound". The type must match Foundry's internal document class name (case-sensitive).`,
+      },
+      _id: {
+        type: "string",
+        description: `The _id of the document to modify. This is the unique identifier for the document in FoundryVTT.`,
+      },
+      updates: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: true,
+        },
+        description: `An array of update objects to apply to the document. Each update object should contain the fields you want to modify, using nested objects to represent the document structure. The _id will be automatically added to each update object.
+
+Example: To update an Actor's strength attribute, you might use:
+[{ "system": { "attributes_physical": { "strength": { "value": 5 } } } }]
+
+Example: To update an Item's description and quantity:
+[{ "system": { "description": "A shiny sword", "quantity": 2 } }]
+
+The exact field structure depends on the game system. Use the get_* tools first to inspect the document's current structure and determine the correct field paths.`,
+      },
+    },
+    required: ["type", "_id", "updates"],
+  },
+};
+
 // Create server instance
 const server = new Server(
   {
@@ -95,10 +131,13 @@ const server = new Server(
 
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  const tools = DOCUMENT_TYPES.flatMap((config) => [
-    generateListToolDefinition(config),
-    generateGetToolDefinition(config),
-  ]);
+  const tools = [
+    ...DOCUMENT_TYPES.flatMap((config) => [
+      generateListToolDefinition(config),
+      generateGetToolDefinition(config),
+    ]),
+    modifyDocumentTool,
+  ];
 
   return { tools };
 });
@@ -178,6 +217,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           `Error fetching ${config.description}: ${error instanceof Error ? error.message : String(error)}`
         );
       }
+    }
+  }
+
+  // Handle modify_document
+  if (name === "modify_document") {
+    try {
+      const type = args?.type as string | undefined;
+      const _id = args?._id as string | undefined;
+      const updates = args?.updates as Record<string, unknown>[] | undefined;
+
+      if (!type) {
+        return errorResponse("Error: 'type' is required");
+      }
+      if (!_id) {
+        return errorResponse("Error: '_id' is required");
+      }
+      if (!updates || !Array.isArray(updates)) {
+        return errorResponse("Error: 'updates' must be an array of objects");
+      }
+
+      const result = await foundryClient.modifyDocument(type, _id, updates);
+      return successResponse(result);
+    } catch (error) {
+      return errorResponse(
+        `Error modifying document: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
 

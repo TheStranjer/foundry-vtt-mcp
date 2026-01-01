@@ -29,6 +29,7 @@ export class FoundryClient {
   private connection: FoundryConnection | null = null;
   private reconnecting = false;
   private configPath: string;
+  private messageCounter = 1;
 
   constructor(configPath?: string) {
     this.configPath =
@@ -531,6 +532,111 @@ export class FoundryClient {
 
     // Filter fields
     return this.filterDocumentFields(doc, requestedFields);
+  }
+
+  /**
+   * Modify a document in FoundryVTT
+   * @param type - The document type (Actor, Item, Scene, JournalEntry, Folder, User, etc.)
+   * @param _id - The _id of the document to modify
+   * @param updates - Array of update objects. Each object should contain the _id and the fields to update.
+   *                  Updates use dot-notation paths merged into the document, e.g.:
+   *                  { "_id": "abc123", "system": { "attributes": { "hp": { "value": 10 } } } }
+   * @returns The result from Foundry containing the updated document data
+   */
+  async modifyDocument(
+    type: string,
+    _id: string,
+    updates: Record<string, unknown>[]
+  ): Promise<Record<string, unknown>> {
+    if (!this.connection || this.connection.ws.readyState !== WebSocket.OPEN) {
+      throw new Error("Not connected to Foundry server");
+    }
+
+    const ws = this.connection.ws;
+    const ackId = this.messageCounter++;
+
+    // Ensure each update object has the _id
+    const updatesWithId = updates.map((update) => ({
+      ...update,
+      _id,
+    }));
+
+    const payload = [
+      "modifyDocument",
+      {
+        type,
+        action: "update",
+        operation: {
+          parent: null,
+          pack: null,
+          updates: updatesWithId,
+          action: "update",
+          modifiedTime: Date.now(),
+          diff: true,
+          recursive: true,
+          render: true,
+        },
+      },
+    ];
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        ws.off("message", messageHandler);
+        reject(new Error(`Timeout waiting for modifyDocument response (30s) for ${type} ${_id}`));
+      }, 30000);
+
+      const messageHandler = (data: WebSocket.Data) => {
+        const message = data.toString();
+
+        // Look for Socket.IO ack response: 43{id}[...]
+        if (message.startsWith("43")) {
+          try {
+            // Find where the JSON array starts
+            const jsonStart = message.indexOf("[");
+            if (jsonStart === -1) return;
+
+            const jsonPart = message.slice(jsonStart);
+            const responseArray = JSON.parse(jsonPart) as unknown[];
+
+            if (!Array.isArray(responseArray) || responseArray.length === 0) {
+              return;
+            }
+
+            const responseData = responseArray[0] as Record<string, unknown>;
+
+            // Check if this response matches our request by type and _id in result
+            if (responseData.type !== type) {
+              return;
+            }
+
+            // Check if the result contains our _id
+            const result = responseData.result as Record<string, unknown>[] | undefined;
+            if (!result || !Array.isArray(result)) {
+              return;
+            }
+
+            const hasMatchingId = result.some((r) => r._id === _id);
+            if (!hasMatchingId) {
+              return;
+            }
+
+            // This is our response
+            clearTimeout(timeout);
+            ws.off("message", messageHandler);
+            resolve(responseData);
+          } catch (error) {
+            // Parse error, not our message, continue waiting
+          }
+        }
+      };
+
+      ws.on("message", messageHandler);
+
+      // Send the modifyDocument request
+      const messageStr = `42${ackId}${JSON.stringify(payload)}`;
+      console.error(`[FoundryClient] Sending modifyDocument: ${messageStr}`);
+      ws.send(messageStr);
+    });
   }
 
   // Convenience methods for specific document types
