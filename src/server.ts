@@ -5,6 +5,10 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { FoundryClient } from "./foundry-client.js";
+
+// Create the Foundry client instance
+const foundryClient = new FoundryClient();
 
 // Create server instance
 const server = new Server(
@@ -46,12 +50,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   if (name === "get_actor") {
-    // Your FoundryVTT WebSocket logic here
+    if (!foundryClient.isConnected()) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: Not connected to FoundryVTT server",
+          },
+        ],
+        isError: true,
+      };
+    }
+    // TODO: Implement actual WebSocket message to get actor data
     return {
       content: [
         {
           type: "text",
-          text: `Actor data for ${args?.actorId}`,
+          text: `Actor data for ${args?.actorId} (connected to ${foundryClient.getHostname()})`,
         },
       ],
     };
@@ -62,6 +77,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 // Start the server
 async function main() {
+  // Connect to FoundryVTT first
+  console.error("Connecting to FoundryVTT...");
+  await foundryClient.connect();
+  console.error(`Connected to FoundryVTT at ${foundryClient.getHostname()}`);
+
+  // Start the MCP server
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("FoundryVTT MCP server running on stdio");
