@@ -12,19 +12,3 @@
   },
   "include": ["src/**/*"]
 }
-```
-
-## Key Points for stdio MCP Servers
-
-1. **Communication**: Uses stdin/stdout for JSON-RPC messages
-2. **Logging**: Use `console.error()` for debug logs (stderr), never `console.log()` which goes to stdout
-3. **No HTTP/WebSocket server**: The MCP client (like Claude) launches your process and communicates via pipes
-4. **Cross-platform**: Works on Windows, macOS, Linux with no additional setup
-
-## File Structure
-```
-foundry-mcp-server/
-├── package.json
-├── tsconfig.json
-└── src/
-    └── server.ts
