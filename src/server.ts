@@ -10,6 +10,76 @@ import { FoundryClient } from "./foundry-client.js";
 // Create the Foundry client instance
 const foundryClient = new FoundryClient();
 
+// Document type configurations for tool generation
+interface DocumentTypeConfig {
+  singular: string;      // e.g., "actor"
+  plural: string;        // e.g., "actors"
+  collection: string;    // e.g., "actors" (the key in world data)
+  description: string;   // e.g., "actor" for descriptions
+}
+
+const DOCUMENT_TYPES: DocumentTypeConfig[] = [
+  { singular: "actor", plural: "actors", collection: "actors", description: "actor" },
+  { singular: "item", plural: "items", collection: "items", description: "item" },
+  { singular: "folder", plural: "folders", collection: "folders", description: "folder" },
+  { singular: "user", plural: "users", collection: "users", description: "user" },
+  { singular: "scene", plural: "scenes", collection: "scenes", description: "scene" },
+  { singular: "journal", plural: "journals", collection: "journal", description: "journal entry" },
+];
+
+// Generate tool definitions for a document type
+function generateListToolDefinition(config: DocumentTypeConfig) {
+  return {
+    name: `get_${config.plural}`,
+    description: `Get all ${config.plural} from FoundryVTT`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        max_length: {
+          type: "integer",
+          description: `Maximum number of bytes the JSON response can be. ${config.plural.charAt(0).toUpperCase() + config.plural.slice(1)} are removed one by one until under this limit. If 0, undefined, or null, there is no limit.`,
+        },
+        requested_fields: {
+          type: "array",
+          items: { type: "string" },
+          description: `Array of field names to include in each ${config.description} object. Always includes _id and name. If empty, undefined, or null, all fields are included.`,
+        },
+      },
+      required: [],
+    },
+  };
+}
+
+function generateGetToolDefinition(config: DocumentTypeConfig) {
+  return {
+    name: `get_${config.singular}`,
+    description: `Get a specific ${config.description} from FoundryVTT by id, _id, or name`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: `The id of the ${config.description} to retrieve`,
+        },
+        _id: {
+          type: "string",
+          description: `The _id of the ${config.description} to retrieve`,
+        },
+        name: {
+          type: "string",
+          description: `The name of the ${config.description} to retrieve`,
+        },
+        requested_fields: {
+          type: "array",
+          items: { type: "string" },
+          description: `Array of field names to include in the ${config.description} object. Always includes _id and name. If empty, undefined, or null, all fields are included.`,
+        },
+      },
+      required: [],
+    },
+  };
+}
+
 // Create server instance
 const server = new Server(
   {
@@ -25,173 +95,89 @@ const server = new Server(
 
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: "get_actors",
-        description: "Get all actors from FoundryVTT",
-        inputSchema: {
-          type: "object",
-          properties: {
-            max_length: {
-              type: "integer",
-              description:
-                "Maximum number of bytes the JSON response can be. Actors are removed one by one until under this limit. If 0, undefined, or null, there is no limit.",
-            },
-            requested_fields: {
-              type: "array",
-              items: { type: "string" },
-              description:
-                "Array of field names to include in each actor object. Always includes _id and name. If empty, undefined, or null, all fields are included.",
-            },
-          },
-          required: [],
-        },
-      },
-      {
-        name: "get_actor",
-        description: "Get a specific actor from FoundryVTT by id, _id, or name",
-        inputSchema: {
-          type: "object",
-          properties: {
-            id: {
-              type: "string",
-              description: "The id of the actor to retrieve",
-            },
-            _id: {
-              type: "string",
-              description: "The _id of the actor to retrieve",
-            },
-            name: {
-              type: "string",
-              description: "The name of the actor to retrieve",
-            },
-            requested_fields: {
-              type: "array",
-              items: { type: "string" },
-              description:
-                "Array of field names to include in the actor object. Always includes _id and name. If empty, undefined, or null, all fields are included.",
-            },
-          },
-          required: [],
-        },
-      },
-    ],
-  };
+  const tools = DOCUMENT_TYPES.flatMap((config) => [
+    generateListToolDefinition(config),
+    generateGetToolDefinition(config),
+  ]);
+
+  return { tools };
 });
+
+// Helper to create error response
+function errorResponse(message: string) {
+  return {
+    content: [{ type: "text", text: message }],
+    isError: true,
+  };
+}
+
+// Helper to create success response
+function successResponse(data: unknown) {
+  return {
+    content: [{ type: "text", text: JSON.stringify(data) }],
+  };
+}
 
 // Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
-  if (name === "get_actors") {
-    if (!foundryClient.isConnected()) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Error: Not connected to FoundryVTT server",
-          },
-        ],
-        isError: true,
-      };
-    }
-
-    try {
-      const maxLength = args?.max_length as number | undefined;
-      const requestedFields = args?.requested_fields as string[] | undefined;
-
-      const actors = await foundryClient.getActors({
-        maxLength: maxLength || null,
-        requestedFields: requestedFields || null,
-      });
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(actors),
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching actors: ${error instanceof Error ? error.message : String(error)}`,
-          },
-        ],
-        isError: true,
-      };
-    }
+  // Check connection for all tools
+  if (!foundryClient.isConnected()) {
+    return errorResponse("Error: Not connected to FoundryVTT server");
   }
 
-  if (name === "get_actor") {
-    if (!foundryClient.isConnected()) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Error: Not connected to FoundryVTT server",
-          },
-        ],
-        isError: true,
-      };
+  // Find matching document type
+  for (const config of DOCUMENT_TYPES) {
+    // Handle get_[plural] (list all)
+    if (name === `get_${config.plural}`) {
+      try {
+        const maxLength = args?.max_length as number | undefined;
+        const requestedFields = args?.requested_fields as string[] | undefined;
+
+        const docs = await foundryClient.getDocuments(config.collection, {
+          maxLength: maxLength || null,
+          requestedFields: requestedFields || null,
+        });
+
+        return successResponse(docs);
+      } catch (error) {
+        return errorResponse(
+          `Error fetching ${config.plural}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
     }
 
-    try {
-      const id = args?.id as string | undefined;
-      const _id = args?._id as string | undefined;
-      const actorName = args?.name as string | undefined;
-      const requestedFields = args?.requested_fields as string[] | undefined;
+    // Handle get_[singular] (get one)
+    if (name === `get_${config.singular}`) {
+      try {
+        const id = args?.id as string | undefined;
+        const _id = args?._id as string | undefined;
+        const docName = args?.name as string | undefined;
+        const requestedFields = args?.requested_fields as string[] | undefined;
 
-      if (!id && !_id && !actorName) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Error: Must provide at least one of: id, _id, or name",
-            },
-          ],
-          isError: true,
-        };
+        if (!id && !_id && !docName) {
+          return errorResponse("Error: Must provide at least one of: id, _id, or name");
+        }
+
+        const doc = await foundryClient.getDocument(
+          config.collection,
+          { id, _id, name: docName },
+          { requestedFields: requestedFields || null }
+        );
+
+        if (!doc) {
+          return {
+            content: [{ type: "text", text: `${config.description.charAt(0).toUpperCase() + config.description.slice(1)} not found` }],
+          };
+        }
+
+        return successResponse(doc);
+      } catch (error) {
+        return errorResponse(
+          `Error fetching ${config.description}: ${error instanceof Error ? error.message : String(error)}`
+        );
       }
-
-      const actor = await foundryClient.getActor(
-        { id, _id, name: actorName },
-        { requestedFields: requestedFields || null }
-      );
-
-      if (!actor) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Actor not found",
-            },
-          ],
-        };
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(actor),
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching actor: ${error instanceof Error ? error.message : String(error)}`,
-          },
-        ],
-        isError: true,
-      };
     }
   }
 

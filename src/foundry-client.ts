@@ -361,11 +361,11 @@ export class FoundryClient {
   }
 
   /**
-   * Filter actor object to only include requested fields (always includes _id and name)
+   * Filter document object to only include requested fields (always includes _id and name)
    */
-  private filterActorFields(actor: Record<string, unknown>, requestedFields: string[] | null): Record<string, unknown> {
+  private filterDocumentFields(doc: Record<string, unknown>, requestedFields: string[] | null): Record<string, unknown> {
     if (!requestedFields || requestedFields.length === 0) {
-      return actor;
+      return doc;
     }
 
     // Always include _id and name
@@ -375,22 +375,22 @@ export class FoundryClient {
 
     const filtered: Record<string, unknown> = {};
     for (const field of fieldsToInclude) {
-      if (field in actor) {
-        filtered[field] = actor[field];
+      if (field in doc) {
+        filtered[field] = doc[field];
       }
     }
     return filtered;
   }
 
   /**
-   * Truncate actors array until JSON is under maxLength bytes
+   * Truncate documents array until JSON is under maxLength bytes
    */
-  private truncateActors(actors: Record<string, unknown>[], maxLength: number): Record<string, unknown>[] {
+  private truncateDocuments(docs: Record<string, unknown>[], maxLength: number): Record<string, unknown>[] {
     if (!maxLength || maxLength <= 0) {
-      return actors;
+      return docs;
     }
 
-    let result = [...actors];
+    let result = [...docs];
     while (result.length > 0) {
       const json = JSON.stringify(result);
       if (Buffer.byteLength(json, "utf-8") <= maxLength) {
@@ -453,44 +453,53 @@ export class FoundryClient {
     });
   }
 
+  /** Valid document collection names in FoundryVTT */
+  static readonly DOCUMENT_COLLECTIONS = ["actors", "items", "folders", "users", "scenes", "journal"] as const;
+
   /**
-   * Request actors from the world
-   * @param options.maxLength - Maximum bytes for the JSON response; actors removed until under limit
+   * Request documents from a specific collection in the world
+   * @param collection - The collection name (actors, items, folders, users, scenes, journal)
+   * @param options.maxLength - Maximum bytes for the JSON response; documents removed until under limit
    * @param options.requestedFields - Array of field names to include (always includes _id and name)
-   * @returns Array of actor objects
+   * @returns Array of document objects
    */
-  async getActors(options?: {
-    maxLength?: number | null;
-    requestedFields?: string[] | null;
-  }): Promise<Record<string, unknown>[]> {
+  async getDocuments(
+    collection: string,
+    options?: {
+      maxLength?: number | null;
+      requestedFields?: string[] | null;
+    }
+  ): Promise<Record<string, unknown>[]> {
     const maxLength = options?.maxLength ?? 0;
     const requestedFields = options?.requestedFields ?? null;
 
     const worldData = await this.requestWorldData();
-    const actors = worldData.actors as Record<string, unknown>[] | undefined;
+    const docs = worldData[collection] as Record<string, unknown>[] | undefined;
 
-    if (!actors || !Array.isArray(actors)) {
-      throw new Error("Response does not contain actors array");
+    if (!docs || !Array.isArray(docs)) {
+      throw new Error(`Response does not contain ${collection} array`);
     }
 
-    // Filter fields for each actor
-    let filteredActors = actors.map((actor) =>
-      this.filterActorFields(actor, requestedFields)
+    // Filter fields for each document
+    let filteredDocs = docs.map((doc) =>
+      this.filterDocumentFields(doc, requestedFields)
     );
 
     // Truncate if needed
-    filteredActors = this.truncateActors(filteredActors, maxLength);
+    filteredDocs = this.truncateDocuments(filteredDocs, maxLength);
 
-    return filteredActors;
+    return filteredDocs;
   }
 
   /**
-   * Request a specific actor by id, _id, or name
-   * @param identifier - The id, _id, or name of the actor to find
+   * Request a specific document by id, _id, or name from a collection
+   * @param collection - The collection name (actors, items, folders, users, scenes, journal)
+   * @param identifier - The id, _id, or name of the document to find
    * @param options.requestedFields - Array of field names to include (always includes _id and name)
-   * @returns The actor object or null if not found
+   * @returns The document object or null if not found
    */
-  async getActor(
+  async getDocument(
+    collection: string,
     identifier: { id?: string; _id?: string; name?: string },
     options?: {
       requestedFields?: string[] | null;
@@ -499,29 +508,78 @@ export class FoundryClient {
     const requestedFields = options?.requestedFields ?? null;
 
     const worldData = await this.requestWorldData();
-    const actors = worldData.actors as Record<string, unknown>[] | undefined;
+    const docs = worldData[collection] as Record<string, unknown>[] | undefined;
 
-    if (!actors || !Array.isArray(actors)) {
-      throw new Error("Response does not contain actors array");
+    if (!docs || !Array.isArray(docs)) {
+      throw new Error(`Response does not contain ${collection} array`);
     }
 
-    // Find the actor by id, _id, or name
-    let actor: Record<string, unknown> | undefined;
+    // Find the document by id, _id, or name
+    let doc: Record<string, unknown> | undefined;
 
     if (identifier.id) {
-      actor = actors.find((a) => a.id === identifier.id || a._id === identifier.id);
+      doc = docs.find((d) => d.id === identifier.id || d._id === identifier.id);
     } else if (identifier._id) {
-      actor = actors.find((a) => a._id === identifier._id || a.id === identifier._id);
+      doc = docs.find((d) => d._id === identifier._id || d.id === identifier._id);
     } else if (identifier.name) {
-      actor = actors.find((a) => a.name === identifier.name);
+      doc = docs.find((d) => d.name === identifier.name);
     }
 
-    if (!actor) {
+    if (!doc) {
       return null;
     }
 
     // Filter fields
-    return this.filterActorFields(actor, requestedFields);
+    return this.filterDocumentFields(doc, requestedFields);
+  }
+
+  // Convenience methods for specific document types
+  async getActors(options?: { maxLength?: number | null; requestedFields?: string[] | null }) {
+    return this.getDocuments("actors", options);
+  }
+
+  async getActor(identifier: { id?: string; _id?: string; name?: string }, options?: { requestedFields?: string[] | null }) {
+    return this.getDocument("actors", identifier, options);
+  }
+
+  async getItems(options?: { maxLength?: number | null; requestedFields?: string[] | null }) {
+    return this.getDocuments("items", options);
+  }
+
+  async getItem(identifier: { id?: string; _id?: string; name?: string }, options?: { requestedFields?: string[] | null }) {
+    return this.getDocument("items", identifier, options);
+  }
+
+  async getFolders(options?: { maxLength?: number | null; requestedFields?: string[] | null }) {
+    return this.getDocuments("folders", options);
+  }
+
+  async getFolder(identifier: { id?: string; _id?: string; name?: string }, options?: { requestedFields?: string[] | null }) {
+    return this.getDocument("folders", identifier, options);
+  }
+
+  async getUsers(options?: { maxLength?: number | null; requestedFields?: string[] | null }) {
+    return this.getDocuments("users", options);
+  }
+
+  async getUser(identifier: { id?: string; _id?: string; name?: string }, options?: { requestedFields?: string[] | null }) {
+    return this.getDocument("users", identifier, options);
+  }
+
+  async getScenes(options?: { maxLength?: number | null; requestedFields?: string[] | null }) {
+    return this.getDocuments("scenes", options);
+  }
+
+  async getScene(identifier: { id?: string; _id?: string; name?: string }, options?: { requestedFields?: string[] | null }) {
+    return this.getDocument("scenes", identifier, options);
+  }
+
+  async getJournals(options?: { maxLength?: number | null; requestedFields?: string[] | null }) {
+    return this.getDocuments("journal", options);
+  }
+
+  async getJournal(identifier: { id?: string; _id?: string; name?: string }, options?: { requestedFields?: string[] | null }) {
+    return this.getDocument("journal", identifier, options);
   }
 
   /**
