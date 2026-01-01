@@ -28,17 +28,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
-        name: "get_actor",
-        description: "Get an actor from FoundryVTT",
+        name: "get_actors",
+        description: "Get all actors from FoundryVTT",
         inputSchema: {
           type: "object",
           properties: {
-            actorId: {
-              type: "string",
-              description: "The ID of the actor to retrieve",
+            max_length: {
+              type: "integer",
+              description:
+                "Maximum number of bytes the JSON response can be. Actors are removed one by one until under this limit. If 0, undefined, or null, there is no limit.",
+            },
+            requested_fields: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "Array of field names to include in each actor object. Always includes _id and name. If empty, undefined, or null, all fields are included.",
             },
           },
-          required: ["actorId"],
+          required: [],
         },
       },
     ],
@@ -49,7 +56,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
-  if (name === "get_actor") {
+  if (name === "get_actors") {
     if (!foundryClient.isConnected()) {
       return {
         content: [
@@ -61,15 +68,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         isError: true,
       };
     }
-    // TODO: Implement actual WebSocket message to get actor data
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Actor data for ${args?.actorId} (connected to ${foundryClient.getHostname()})`,
-        },
-      ],
-    };
+
+    try {
+      const maxLength = args?.max_length as number | undefined;
+      const requestedFields = args?.requested_fields as string[] | undefined;
+
+      const actors = await foundryClient.getActors({
+        maxLength: maxLength || null,
+        requestedFields: requestedFields || null,
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(actors),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching actors: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
   }
 
   throw new Error(`Unknown tool: ${name}`);

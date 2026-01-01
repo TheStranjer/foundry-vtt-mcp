@@ -219,10 +219,9 @@ export class FoundryClient {
         return;
       }
 
-      // Socket.IO session event - reply with world request
+      // Socket.IO session event - connection is ready
       if (message.includes('["session",')) {
-        console.error("[FoundryClient] Received session event, requesting world data");
-        ws.send('420["world"]');
+        console.error("[FoundryClient] Received session event, connection ready");
         return;
       }
     });
@@ -359,6 +358,120 @@ export class FoundryClient {
       throw new Error("Not connected to Foundry server");
     }
     this.connection.ws.send(data);
+  }
+
+  /**
+   * Filter actor object to only include requested fields (always includes _id and name)
+   */
+  private filterActorFields(actor: Record<string, unknown>, requestedFields: string[] | null): Record<string, unknown> {
+    if (!requestedFields || requestedFields.length === 0) {
+      return actor;
+    }
+
+    // Always include _id and name
+    const fieldsToInclude = new Set(requestedFields);
+    fieldsToInclude.add("_id");
+    fieldsToInclude.add("name");
+
+    const filtered: Record<string, unknown> = {};
+    for (const field of fieldsToInclude) {
+      if (field in actor) {
+        filtered[field] = actor[field];
+      }
+    }
+    return filtered;
+  }
+
+  /**
+   * Truncate actors array until JSON is under maxLength bytes
+   */
+  private truncateActors(actors: Record<string, unknown>[], maxLength: number): Record<string, unknown>[] {
+    if (!maxLength || maxLength <= 0) {
+      return actors;
+    }
+
+    let result = [...actors];
+    while (result.length > 0) {
+      const json = JSON.stringify(result);
+      if (Buffer.byteLength(json, "utf-8") <= maxLength) {
+        return result;
+      }
+      result.pop();
+    }
+    return result;
+  }
+
+  /**
+   * Request actors from the world
+   * @param options.maxLength - Maximum bytes for the JSON response; actors removed until under limit
+   * @param options.requestedFields - Array of field names to include (always includes _id and name)
+   * @returns Array of actor objects
+   */
+  async getActors(options?: {
+    maxLength?: number | null;
+    requestedFields?: string[] | null;
+  }): Promise<Record<string, unknown>[]> {
+    if (!this.connection || this.connection.ws.readyState !== WebSocket.OPEN) {
+      throw new Error("Not connected to Foundry server");
+    }
+
+    const ws = this.connection.ws;
+    const maxLength = options?.maxLength ?? 0;
+    const requestedFields = options?.requestedFields ?? null;
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        ws.off("message", messageHandler);
+        reject(new Error("Timeout waiting for world data (30s)"));
+      }, 30000);
+
+      const messageHandler = (data: WebSocket.Data) => {
+        const message = data.toString();
+
+        // Look for Socket.IO event response: 430[...]
+        if (message.startsWith("430")) {
+          clearTimeout(timeout);
+          ws.off("message", messageHandler);
+
+          try {
+            // Parse the response - format is 430[{...}]
+            const jsonPart = message.slice(3);
+            const responseArray = JSON.parse(jsonPart) as unknown[];
+
+            if (!Array.isArray(responseArray) || responseArray.length === 0) {
+              reject(new Error("Invalid response format: expected array with data"));
+              return;
+            }
+
+            const responseData = responseArray[0] as Record<string, unknown>;
+            const actors = responseData.actors as Record<string, unknown>[] | undefined;
+
+            if (!actors || !Array.isArray(actors)) {
+              reject(new Error("Response does not contain actors array"));
+              return;
+            }
+
+            // Filter fields for each actor
+            let filteredActors = actors.map((actor) =>
+              this.filterActorFields(actor, requestedFields)
+            );
+
+            // Truncate if needed
+            filteredActors = this.truncateActors(filteredActors, maxLength);
+
+            resolve(filteredActors);
+          } catch (error) {
+            reject(new Error(`Failed to parse world response: ${error}`));
+          }
+        }
+      };
+
+      ws.on("message", messageHandler);
+
+      // Send the world request
+      console.error("[FoundryClient] Requesting world data for actors...");
+      ws.send('420["world"]');
+    });
   }
 
   /**
