@@ -209,7 +209,22 @@ export class FoundryClient {
     });
 
     ws.on("message", (data) => {
-      console.error(`[FoundryClient] WebSocket message: ${data.toString()}`);
+      const message = data.toString();
+      console.error(`[FoundryClient] WebSocket message: ${message}`);
+
+      // Engine.IO handshake - reply with Socket.IO connect
+      if (message.startsWith("0{")) {
+        console.error("[FoundryClient] Received Engine.IO handshake, sending Socket.IO connect");
+        ws.send("40");
+        return;
+      }
+
+      // Socket.IO session event - reply with world request
+      if (message.includes('["session",')) {
+        console.error("[FoundryClient] Received session event, requesting world data");
+        ws.send('420["world"]');
+        return;
+      }
     });
   }
 
