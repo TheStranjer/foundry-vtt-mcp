@@ -34,6 +34,7 @@ export class FoundryClient {
   constructor(configPath?: string) {
     this.configPath =
       configPath ||
+      process.env.FOUNDRY_CREDENTIALS ||
       path.join(process.cwd(), "config", "foundry_credentials.json");
   }
 
