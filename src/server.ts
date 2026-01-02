@@ -25,6 +25,13 @@ const DOCUMENT_TYPES: DocumentTypeConfig[] = [
   { singular: "user", plural: "users", collection: "users", description: "user" },
   { singular: "scene", plural: "scenes", collection: "scenes", description: "scene" },
   { singular: "journal", plural: "journals", collection: "journal", description: "journal entry" },
+  { singular: "macro", plural: "macros", collection: "macros", description: "macro" },
+  { singular: "card", plural: "cards", collection: "cards", description: "card" },
+  { singular: "playlist", plural: "playlists", collection: "playlists", description: "playlist" },
+  { singular: "table", plural: "tables", collection: "tables", description: "table" },
+  { singular: "combat", plural: "combats", collection: "combats", description: "combats" },
+  { singular: "message", plural: "messages", collection: "messages", description: "messages" },
+  { singular: "setting", plural: "settings", collection: "settings", description: "settings" },
 ];
 
 // Generate tool definitions for a document type
