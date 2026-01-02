@@ -39,14 +39,27 @@ Create a file at `config/foundry_credentials.json`:
 ```json
 [
   {
+    "_id": "my-campaign",
     "hostname": "your-foundry-server.com",
     "userid": "your-user-id",
     "password": "your-password"
+  },
+  {
+    "_id": "test-world",
+    "hostname": "test.foundry-server.com",
+    "userid": "test-user-id",
+    "password": "test-password"
   }
 ]
 ```
 
-You can find your `userid` by inspecting Users in Foundry - it's the document `_id` for your user.
+**Fields:**
+- `_id` - A user-defined identifier for this credential entry (used to switch between instances)
+- `hostname` - The domain/IP of your FoundryVTT server
+- `userid` - Your Foundry user document ID (find by inspecting Users in Foundry admin panel)
+- `password` - Your Foundry user password
+
+You can configure multiple Foundry instances and switch between them at runtime using the `choose_foundry_instance` tool.
 
 ### Environment Variable
 
@@ -192,6 +205,54 @@ Permanently delete documents from FoundryVTT. **This cannot be undone.**
 {
   "type": "Item",
   "ids": ["vlcf6AI5FaE9qjgJ", "abc123def456"]
+}
+```
+
+### Instance Management
+
+#### `show_credentials`
+
+Show all configured Foundry credentials without revealing passwords. Returns the `_id`, `hostname`, `userid`, `item_order` (zero-based index), and `currently_active` status for each credential entry.
+
+**Example response:**
+```json
+[
+  {
+    "_id": "my-campaign",
+    "hostname": "your-foundry-server.com",
+    "userid": "abc123",
+    "item_order": 0,
+    "currently_active": true
+  },
+  {
+    "_id": "test-world",
+    "hostname": "test.foundry-server.com",
+    "userid": "def456",
+    "item_order": 1,
+    "currently_active": false
+  }
+]
+```
+
+#### `choose_foundry_instance`
+
+Switch to a different Foundry instance. Disconnects from the current instance (if any) and connects to the specified one.
+
+**Parameters (at least one required):**
+- `item_order` (integer): Zero-based index of the credential in the array
+- `_id` (string): The user-defined identifier for the credential entry
+
+**Example - Switch by item_order:**
+```json
+{
+  "item_order": 1
+}
+```
+
+**Example - Switch by _id:**
+```json
+{
+  "_id": "test-world"
 }
 ```
 

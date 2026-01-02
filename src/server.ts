@@ -195,6 +195,37 @@ Example: To delete multiple documents:
   },
 };
 
+// Tool definition for showing credentials (without passwords)
+const showCredentialsTool = {
+  name: "show_credentials",
+  description: `Show all configured Foundry credentials without revealing passwords. Returns the _id, hostname, userid, item_order (zero-based index), and currently_active status for each credential entry. Use this to see which Foundry instances are available and which one is currently connected.`,
+  inputSchema: {
+    type: "object",
+    properties: {},
+    required: [],
+  },
+};
+
+// Tool definition for choosing a Foundry instance
+const chooseFoundryInstanceTool = {
+  name: "choose_foundry_instance",
+  description: `Switch to a different Foundry instance. Disconnects from the current instance (if any) and connects to the specified one. You can identify the instance either by item_order (zero-based index) or by _id (the name of the credential entry). Use show_credentials first to see available instances.`,
+  inputSchema: {
+    type: "object",
+    properties: {
+      item_order: {
+        type: "integer",
+        description: `The zero-based index of the credential in the foundry_credentials.json array. Use show_credentials to see the item_order for each instance.`,
+      },
+      _id: {
+        type: "string",
+        description: `The _id (name) of the credential entry. This is the user-defined identifier in the foundry_credentials.json file.`,
+      },
+    },
+    required: [],
+  },
+};
+
 // Create server instance
 const server = new Server(
   {
@@ -219,6 +250,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     modifyDocumentTool,
     createDocumentTool,
     deleteDocumentTool,
+    showCredentialsTool,
+    chooseFoundryInstanceTool,
   ];
 
   return { tools };
@@ -243,8 +276,11 @@ function successResponse(data: unknown) {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
-  // Check connection for all tools
-  if (!foundryClient.isConnected()) {
+  // Tools that don't require a connection
+  const connectionlessTools = ["show_credentials", "choose_foundry_instance"];
+
+  // Check connection for tools that require it
+  if (!connectionlessTools.includes(name) && !foundryClient.isConnected()) {
     return errorResponse("Error: Not connected to FoundryVTT server");
   }
 
@@ -382,6 +418,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     } catch (error) {
       return errorResponse(
         `Error deleting document: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  // Handle show_credentials (does not require connection)
+  if (name === "show_credentials") {
+    try {
+      const credentials = foundryClient.getCredentialsInfo();
+      return successResponse(credentials);
+    } catch (error) {
+      return errorResponse(
+        `Error fetching credentials: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  // Handle choose_foundry_instance
+  if (name === "choose_foundry_instance") {
+    try {
+      const itemOrder = args?.item_order as number | undefined;
+      const _id = args?._id as string | undefined;
+
+      if (itemOrder === undefined && _id === undefined) {
+        return errorResponse("Error: Must provide either item_order or _id");
+      }
+
+      await foundryClient.chooseFoundryInstance({ item_order: itemOrder, _id });
+
+      const hostname = foundryClient.getHostname();
+      return successResponse({
+        success: true,
+        message: `Successfully connected to ${hostname}`,
+        hostname,
+      });
+    } catch (error) {
+      return errorResponse(
+        `Error switching Foundry instance: ${error instanceof Error ? error.message : String(error)}`
       );
     }
   }

@@ -6,9 +6,18 @@ import * as crypto from "crypto";
 import WebSocket from "ws";
 
 interface FoundryCredential {
+  _id: string;       // User-defined identifier for this credential entry
   hostname: string;
   password: string;
   userid: string;
+}
+
+export interface CredentialInfo {
+  _id: string;
+  hostname: string;
+  userid: string;
+  item_order: number;
+  currently_active: boolean;
 }
 
 interface JoinResponse {
@@ -30,6 +39,8 @@ export class FoundryClient {
   private reconnecting = false;
   private configPath: string;
   private messageCounter = 1;
+  private credentials: FoundryCredential[] = [];
+  private activeCredentialIndex: number = -1;
 
   constructor(configPath?: string) {
     this.configPath =
@@ -277,13 +288,14 @@ export class FoundryClient {
    * Connect to FoundryVTT, trying each credential until one works
    */
   async connect(): Promise<void> {
-    const credentials = this.loadCredentials();
+    this.credentials = this.loadCredentials();
 
-    if (credentials.length === 0) {
+    if (this.credentials.length === 0) {
       throw new Error("No credentials found in config file");
     }
 
-    for (const credential of credentials) {
+    for (let i = 0; i < this.credentials.length; i++) {
+      const credential = this.credentials[i];
       const hostname = credential.hostname;
       console.error(`[FoundryClient] Trying to connect to ${hostname}...`);
 
@@ -312,6 +324,7 @@ export class FoundryClient {
           sessionId,
           ws,
         };
+        this.activeCredentialIndex = i;
 
         console.error(
           `[FoundryClient] Successfully connected to ${hostname}`
@@ -326,6 +339,87 @@ export class FoundryClient {
     }
 
     throw new Error("Failed to connect to any Foundry server");
+  }
+
+  /**
+   * Connect to a specific Foundry instance by item_order (index) or _id
+   * @param identifier - Either { item_order: number } or { _id: string }
+   */
+  async chooseFoundryInstance(identifier: { item_order?: number; _id?: string }): Promise<void> {
+    if (this.credentials.length === 0) {
+      this.credentials = this.loadCredentials();
+    }
+
+    if (this.credentials.length === 0) {
+      throw new Error("No credentials found in config file");
+    }
+
+    let targetIndex: number;
+
+    if (identifier.item_order !== undefined) {
+      if (identifier.item_order < 0 || identifier.item_order >= this.credentials.length) {
+        throw new Error(`Invalid item_order: ${identifier.item_order}. Valid range is 0-${this.credentials.length - 1}`);
+      }
+      targetIndex = identifier.item_order;
+    } else if (identifier._id !== undefined) {
+      targetIndex = this.credentials.findIndex(c => c._id === identifier._id);
+      if (targetIndex === -1) {
+        const validIds = this.credentials.map(c => c._id).join(", ");
+        throw new Error(`No credential found with _id: "${identifier._id}". Valid _ids are: ${validIds}`);
+      }
+    } else {
+      throw new Error("Must provide either item_order or _id");
+    }
+
+    const credential = this.credentials[targetIndex];
+    const hostname = credential.hostname;
+
+    console.error(`[FoundryClient] Connecting to instance: ${credential._id} (${hostname})...`);
+
+    // Disconnect existing connection if any
+    if (this.connection) {
+      this.connection.ws.close();
+      this.connection = null;
+      this.activeCredentialIndex = -1;
+    }
+
+    // Connect to the chosen instance
+    const sessionId = await this.getSession(hostname);
+    const success = await this.authenticate(hostname, sessionId, credential);
+
+    if (!success) {
+      throw new Error(`Authentication failed for ${hostname}`);
+    }
+
+    const ws = await this.connectWebSocket(hostname, sessionId);
+    this.setupWebSocketHandlers(ws);
+
+    this.connection = {
+      hostname,
+      credential,
+      sessionId,
+      ws,
+    };
+    this.activeCredentialIndex = targetIndex;
+
+    console.error(`[FoundryClient] Successfully connected to ${credential._id} (${hostname})`);
+  }
+
+  /**
+   * Get credential information without passwords
+   */
+  getCredentialsInfo(): CredentialInfo[] {
+    if (this.credentials.length === 0) {
+      this.credentials = this.loadCredentials();
+    }
+
+    return this.credentials.map((cred, index) => ({
+      _id: cred._id,
+      hostname: cred.hostname,
+      userid: cred.userid,
+      item_order: index,
+      currently_active: index === this.activeCredentialIndex,
+    }));
   }
 
   /**
