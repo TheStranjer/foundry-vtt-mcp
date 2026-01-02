@@ -155,6 +155,17 @@ The exact field structure depends on the game system. Use the get_* tools first 
   },
 };
 
+// Tool definition for getting world data (excluding document collections)
+const getWorldTool = {
+  name: "get_world",
+  description: `Get world metadata from FoundryVTT. Returns information about the world such as title, system, version, and other metadata. This excludes document collections (actors, items, scenes, etc.) - use the specific get_* tools for those.`,
+  inputSchema: {
+    type: "object",
+    properties: {},
+    required: [],
+  },
+};
+
 // Tool definition for deleting documents
 const deleteDocumentTool = {
   name: "delete_document",
@@ -204,6 +215,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       generateListToolDefinition(config),
       generateGetToolDefinition(config),
     ]),
+    getWorldTool,
     modifyDocumentTool,
     createDocumentTool,
     deleteDocumentTool,
@@ -287,6 +299,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           `Error fetching ${config.description}: ${error instanceof Error ? error.message : String(error)}`
         );
       }
+    }
+  }
+
+  // Handle get_world
+  if (name === "get_world") {
+    try {
+      // Extract all collection keys from DOCUMENT_TYPES to exclude them
+      const excludeCollections = DOCUMENT_TYPES.map((config) => config.collection);
+      const world = await foundryClient.getWorld(excludeCollections);
+      return successResponse(world);
+    } catch (error) {
+      return errorResponse(
+        `Error fetching world: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
 

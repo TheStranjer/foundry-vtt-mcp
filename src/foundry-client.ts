@@ -870,6 +870,25 @@ export class FoundryClient {
   }
 
   /**
+   * Get world data excluding document collection keys
+   * @param excludeCollections - Array of collection keys to exclude from the world data
+   * @returns The world data with the specified collections removed
+   */
+  async getWorld(excludeCollections: string[]): Promise<Record<string, unknown>> {
+    const worldData = await this.requestWorldData();
+
+    // Create a new object excluding the specified collections
+    const filteredWorld: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(worldData)) {
+      if (!excludeCollections.includes(key)) {
+        filteredWorld[key] = value;
+      }
+    }
+
+    return filteredWorld;
+  }
+
+  /**
    * Close the connection
    */
   disconnect(): void {
