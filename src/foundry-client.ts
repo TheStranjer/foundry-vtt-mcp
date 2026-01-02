@@ -553,10 +553,32 @@ export class FoundryClient {
   static readonly DOCUMENT_COLLECTIONS = ["actors", "items", "folders", "users", "scenes", "journal"] as const;
 
   /**
+   * Filter documents by a where clause (AND logic for all key-value pairs)
+   */
+  private filterDocumentsByWhere(
+    docs: Record<string, unknown>[],
+    where: Record<string, unknown> | null
+  ): Record<string, unknown>[] {
+    if (!where || Object.keys(where).length === 0) {
+      return docs;
+    }
+
+    return docs.filter((doc) => {
+      for (const [key, value] of Object.entries(where)) {
+        if (doc[key] !== value) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+
+  /**
    * Request documents from a specific collection in the world
    * @param collection - The collection name (actors, items, folders, users, scenes, journal)
    * @param options.maxLength - Maximum bytes for the JSON response; documents removed until under limit
    * @param options.requestedFields - Array of field names to include (always includes _id and name)
+   * @param options.where - Filter documents by field values (AND logic for all conditions)
    * @returns Array of document objects
    */
   async getDocuments(
@@ -564,10 +586,12 @@ export class FoundryClient {
     options?: {
       maxLength?: number | null;
       requestedFields?: string[] | null;
+      where?: Record<string, unknown> | null;
     }
   ): Promise<Record<string, unknown>[]> {
     const maxLength = options?.maxLength ?? 0;
     const requestedFields = options?.requestedFields ?? null;
+    const where = options?.where ?? null;
 
     const worldData = await this.requestWorldData();
     const docs = worldData[collection] as Record<string, unknown>[] | undefined;
@@ -576,8 +600,11 @@ export class FoundryClient {
       throw new Error(`Response does not contain ${collection} array`);
     }
 
+    // Apply where filter first
+    let filteredDocs = this.filterDocumentsByWhere(docs, where);
+
     // Filter fields for each document
-    let filteredDocs = docs.map((doc) =>
+    filteredDocs = filteredDocs.map((doc) =>
       this.filterDocumentFields(doc, requestedFields)
     );
 

@@ -121,6 +121,7 @@ These tools retrieve all documents of a given type from the connected world.
 **Parameters:**
 - `max_length` (integer, optional): Maximum response size in bytes. Documents are removed from the response until it fits within this limit.
 - `requested_fields` (string[], optional): Specific fields to include. Always includes `_id` and `name`. If omitted, all fields are returned.
+- `where` (object, optional): Filter documents by field values. See [Filtering with `where`](#filtering-with-where) below.
 
 ### Document Retrieval (Single)
 
@@ -261,6 +262,61 @@ Switch to a different Foundry instance. Disconnects from the current instance (i
 ### Understanding Document Structure
 
 Document schemas vary significantly between game systems (D&D 5e, Pathfinder, etc.). Use the `get_*` tools to inspect existing documents before attempting to modify or create new ones.
+
+### Filtering with `where`
+
+All collection retrieval tools (`get_actors`, `get_items`, etc.) support the `where` parameter for filtering results. The `where` parameter accepts an object with key-value pairs that documents must match.
+
+**How it works:**
+- Each key-value pair in `where` is a condition that must be satisfied
+- All conditions use **AND logic** - a document must match ALL conditions to be included
+- Values are compared using strict equality
+
+**Example - Get actors in a specific folder:**
+```json
+{
+  "where": {
+    "folder": "abcd1234"
+  }
+}
+```
+
+**Example - Get NPC actors in a specific folder:**
+```json
+{
+  "where": {
+    "folder": "abcd1234",
+    "type": "npc"
+  }
+}
+```
+This returns only actors where `folder` equals `"abcd1234"` AND `type` equals `"npc"`.
+
+**Example - Get items of a specific type:**
+```json
+{
+  "where": {
+    "type": "weapon"
+  }
+}
+```
+
+**Example - Combine with other parameters:**
+```json
+{
+  "where": {
+    "folder": "abcd1234"
+  },
+  "requested_fields": ["name", "type", "system.quantity"],
+  "max_length": 5000
+}
+```
+
+**Common filter fields:**
+- `folder` - Filter by folder ID
+- `type` - Filter by document subtype (e.g., "npc", "character" for actors; "weapon", "armor" for items)
+- `ownership` - Filter by ownership settings
+- Any top-level field on the document can be used as a filter key
 
 ### Response Size Management
 

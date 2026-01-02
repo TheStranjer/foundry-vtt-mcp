@@ -51,6 +51,11 @@ function generateListToolDefinition(config: DocumentTypeConfig) {
           items: { type: "string" },
           description: `Array of field names to include in each ${config.description} object. Always includes _id and name. If empty, undefined, or null, all fields are included.`,
         },
+        where: {
+          type: "object",
+          additionalProperties: true,
+          description: `Filter ${config.plural} by field values. Provide key-value pairs to match. All conditions must match (AND logic). Example: {"folder": "abc123"} returns only ${config.plural} in that folder. Example: {"folder": "abc123", "type": "npc"} returns only ${config.plural} matching both conditions.`,
+        },
       },
       required: [],
     },
@@ -291,10 +296,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
         const maxLength = args?.max_length as number | undefined;
         const requestedFields = args?.requested_fields as string[] | undefined;
+        const where = args?.where as Record<string, unknown> | undefined;
 
         const docs = await foundryClient.getDocuments(config.collection, {
           maxLength: maxLength || null,
           requestedFields: requestedFields || null,
+          where: where || null,
         });
 
         return successResponse(docs);
