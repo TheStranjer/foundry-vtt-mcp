@@ -97,6 +97,13 @@ These tools retrieve all documents of a given type from the connected world.
 | `get_users` | Get all users |
 | `get_scenes` | Get all scenes |
 | `get_journals` | Get all journal entries |
+| `get_macros` | Get all macros |
+| `get_cards` | Get all cards |
+| `get_playlists` | Get all playlists |
+| `get_tables` | Get all roll tables |
+| `get_combats` | Get all combats |
+| `get_messages` | Get all chat messages |
+| `get_settings` | Get all settings |
 
 **Parameters:**
 - `max_length` (integer, optional): Maximum response size in bytes. Documents are removed from the response until it fits within this limit.
@@ -114,12 +121,25 @@ These tools retrieve a single document by ID or name.
 | `get_user` | Get a specific user |
 | `get_scene` | Get a specific scene |
 | `get_journal` | Get a specific journal entry |
+| `get_macro` | Get a specific macro |
+| `get_card` | Get a specific card |
+| `get_playlist` | Get a specific playlist |
+| `get_table` | Get a specific roll table |
+| `get_combat` | Get a specific combat |
+| `get_message` | Get a specific chat message |
+| `get_setting` | Get a specific setting |
 
 **Parameters (at least one required):**
 - `id` (string): Document ID
 - `_id` (string): Document ID (alias)
 - `name` (string): Document name
 - `requested_fields` (string[], optional): Specific fields to include.
+
+### World Metadata
+
+#### `get_world`
+
+Get world metadata from FoundryVTT (title, system, version, etc.), excluding document collections like actors or items. Use the `get_*` document tools for collection data.
 
 ### Document Manipulation
 
