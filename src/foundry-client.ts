@@ -738,8 +738,16 @@ export class FoundryClient {
 
             const responseData = responseArray[0] as Record<string, unknown>;
 
-            // Check if this response matches our request by type and _id in result
+            // Check if this response matches our request by type
             if (responseData.type !== type) {
+              return;
+            }
+
+            // Check if this is an error response - return it immediately
+            if (responseData.error) {
+              clearTimeout(timeout);
+              ws.off("message", messageHandler);
+              resolve(responseData);
               return;
             }
 
@@ -840,6 +848,14 @@ export class FoundryClient {
               return;
             }
 
+            // Check if this is an error response - return it immediately
+            if (responseData.error) {
+              clearTimeout(timeout);
+              ws.off("message", messageHandler);
+              resolve(responseData);
+              return;
+            }
+
             // This is our response
             clearTimeout(timeout);
             ws.off("message", messageHandler);
@@ -920,6 +936,14 @@ export class FoundryClient {
 
             // Check if this response matches our request by type and action
             if (responseData.type !== type || responseData.action !== "delete") {
+              return;
+            }
+
+            // Check if this is an error response - return it immediately
+            if (responseData.error) {
+              clearTimeout(timeout);
+              ws.off("message", messageHandler);
+              resolve(responseData);
               return;
             }
 
