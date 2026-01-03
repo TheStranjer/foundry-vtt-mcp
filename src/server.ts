@@ -142,6 +142,10 @@ Example: To update an Item's description and quantity:
 
 The exact field structure depends on the game system. Use the get_* tools first to inspect the document's current structure and determine the correct field paths.`,
       },
+      parent_uuid: {
+        type: "string",
+        description: `Optional. The UUID of the parent document for embedded documents. Required when modifying embedded documents like Drawings, Tokens, Tiles, Walls, etc. that exist within a parent document (e.g., a Scene). Format: "{ParentType}.{parentId}" (e.g., "Scene.vrKkbtn8u66mv1Y9").`,
+      },
     },
     required: ["type", "_id", "updates"],
   },
@@ -173,6 +177,10 @@ Example: To create an Actor with some system data:
 [{ "name": "Goblin", "type": "npc", "system": { "attributes": { "hp": { "value": 10, "max": 10 } } } }]
 
 The exact field structure depends on the game system. Use the get_* tools first to retrieve an existing document of the same type to understand the expected schema.`,
+      },
+      parent_uuid: {
+        type: "string",
+        description: `Optional. The UUID of the parent document for embedded documents. Required when creating embedded documents like Drawings, Tokens, Tiles, Walls, etc. within a parent document (e.g., a Scene). Format: "{ParentType}.{parentId}" (e.g., "Scene.vrKkbtn8u66mv1Y9").`,
       },
     },
     required: ["type", "data"],
@@ -213,6 +221,10 @@ Example: To delete a single document:
 
 Example: To delete multiple documents:
 ["vlcf6AI5FaE9qjgJ", "abc123def456", "xyz789ghi012"]`,
+      },
+      parent_uuid: {
+        type: "string",
+        description: `Optional. The UUID of the parent document for embedded documents. Required when deleting embedded documents like Drawings, Tokens, Tiles, Walls, etc. from a parent document (e.g., a Scene). Format: "{ParentType}.{parentId}" (e.g., "Scene.vrKkbtn8u66mv1Y9").`,
       },
     },
     required: ["type", "ids"],
@@ -388,6 +400,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const type = args?.type as string | undefined;
       const _id = args?._id as string | undefined;
       const updates = args?.updates as Record<string, unknown>[] | undefined;
+      const parentUuid = args?.parent_uuid as string | undefined;
 
       if (!type) {
         return errorResponse("Error: 'type' is required");
@@ -399,7 +412,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return errorResponse("Error: 'updates' must be an array of objects");
       }
 
-      const result = await foundryClient.modifyDocument(type, _id, updates);
+      const result = await foundryClient.modifyDocument(type, _id, updates, { parentUuid });
       return successResponse(result);
     } catch (error) {
       return errorResponse(
@@ -413,6 +426,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
       const type = args?.type as string | undefined;
       const data = args?.data as Record<string, unknown>[] | undefined;
+      const parentUuid = args?.parent_uuid as string | undefined;
 
       if (!type) {
         return errorResponse("Error: 'type' is required");
@@ -421,7 +435,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return errorResponse("Error: 'data' must be an array of objects");
       }
 
-      const result = await foundryClient.createDocument(type, data);
+      const result = await foundryClient.createDocument(type, data, { parentUuid });
       return successResponse(result);
     } catch (error) {
       return errorResponse(
@@ -435,6 +449,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
       const type = args?.type as string | undefined;
       const ids = args?.ids as string[] | undefined;
+      const parentUuid = args?.parent_uuid as string | undefined;
 
       if (!type) {
         return errorResponse("Error: 'type' is required");
@@ -443,7 +458,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return errorResponse("Error: 'ids' must be a non-empty array of strings");
       }
 
-      const result = await foundryClient.deleteDocument(type, ids);
+      const result = await foundryClient.deleteDocument(type, ids, { parentUuid });
       return successResponse(result);
     } catch (error) {
       return errorResponse(

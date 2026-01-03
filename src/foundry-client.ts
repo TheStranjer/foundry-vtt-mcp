@@ -680,7 +680,8 @@ export class FoundryClient {
   async modifyDocument(
     type: string,
     _id: string,
-    updates: Record<string, unknown>[]
+    updates: Record<string, unknown>[],
+    options?: { parentUuid?: string }
   ): Promise<Record<string, unknown>> {
     if (!this.connection || this.connection.ws.readyState !== WebSocket.OPEN) {
       throw new Error("Not connected to Foundry server");
@@ -695,21 +696,28 @@ export class FoundryClient {
       _id,
     }));
 
+    // Build operation object with optional parentUuid
+    const operation: Record<string, unknown> = {
+      diff: false,
+      pack: null,
+      updates: updatesWithId,
+      action: "update",
+      modifiedTime: Date.now(),
+      recursive: true,
+      render: true,
+    };
+
+    // Add parentUuid if provided (for embedded documents like Drawings in a Scene)
+    if (options?.parentUuid) {
+      operation.parentUuid = options.parentUuid;
+    }
+
     const payload = [
       "modifyDocument",
       {
         type,
         action: "update",
-        operation: {
-          parent: null,
-          pack: null,
-          updates: updatesWithId,
-          action: "update",
-          modifiedTime: Date.now(),
-          diff: true,
-          recursive: true,
-          render: true,
-        },
+        operation,
       },
     ];
 
@@ -792,7 +800,8 @@ export class FoundryClient {
    */
   async createDocument(
     type: string,
-    data: Record<string, unknown>[]
+    data: Record<string, unknown>[],
+    options?: { parentUuid?: string }
   ): Promise<Record<string, unknown>> {
     if (!this.connection || this.connection.ws.readyState !== WebSocket.OPEN) {
       throw new Error("Not connected to Foundry server");
@@ -801,20 +810,27 @@ export class FoundryClient {
     const ws = this.connection.ws;
     const ackId = this.messageCounter++;
 
+    // Build operation object with optional parentUuid
+    const operation: Record<string, unknown> = {
+      pack: null,
+      data,
+      action: "create",
+      modifiedTime: Date.now(),
+      renderSheet: true,
+      render: true,
+    };
+
+    // Add parentUuid if provided (for embedded documents like Drawings in a Scene)
+    if (options?.parentUuid) {
+      operation.parentUuid = options.parentUuid;
+    }
+
     const payload = [
       "modifyDocument",
       {
         type,
         action: "create",
-        operation: {
-          parent: null,
-          pack: null,
-          data,
-          action: "create",
-          modifiedTime: Date.now(),
-          renderSheet: true,
-          render: true,
-        },
+        operation,
       },
     ];
 
@@ -883,7 +899,8 @@ export class FoundryClient {
    */
   async deleteDocument(
     type: string,
-    ids: string[]
+    ids: string[],
+    options?: { parentUuid?: string }
   ): Promise<Record<string, unknown>> {
     if (!this.connection || this.connection.ws.readyState !== WebSocket.OPEN) {
       throw new Error("Not connected to Foundry server");
@@ -892,20 +909,27 @@ export class FoundryClient {
     const ws = this.connection.ws;
     const ackId = this.messageCounter++;
 
+    // Build operation object with optional parentUuid
+    const operation: Record<string, unknown> = {
+      pack: null,
+      ids,
+      action: "delete",
+      modifiedTime: Date.now(),
+      deleteAll: false,
+      render: true,
+    };
+
+    // Add parentUuid if provided (for embedded documents like Drawings in a Scene)
+    if (options?.parentUuid) {
+      operation.parentUuid = options.parentUuid;
+    }
+
     const payload = [
       "modifyDocument",
       {
         type,
         action: "delete",
-        operation: {
-          parent: null,
-          pack: null,
-          ids,
-          action: "delete",
-          modifiedTime: Date.now(),
-          deleteAll: false,
-          render: true,
-        },
+        operation,
       },
     ];
 
