@@ -4,6 +4,7 @@ import * as path from "path";
 import * as https from "https";
 import * as crypto from "crypto";
 import WebSocket from "ws";
+import { WebSocketLogger } from "./websocket-logger.js";
 
 interface FoundryCredential {
   _id: string;       // User-defined identifier for this credential entry
@@ -41,12 +42,14 @@ export class FoundryClient {
   private messageCounter = 1;
   private credentials: FoundryCredential[] = [];
   private activeCredentialIndex: number = -1;
+  private wsLogger: WebSocketLogger;
 
   constructor(configPath?: string) {
     this.configPath =
       configPath ||
       process.env.FOUNDRY_CREDENTIALS ||
       path.join(process.cwd(), "config", "foundry_credentials.json");
+    this.wsLogger = new WebSocketLogger();
   }
 
   /**
@@ -223,12 +226,13 @@ export class FoundryClient {
 
     ws.on("message", (data) => {
       const message = data.toString();
+      this.wsLogger.logInbound(message);
       console.error(`[FoundryClient] WebSocket message: ${message}`);
 
       // Engine.IO handshake - reply with Socket.IO connect
       if (message.startsWith("0{")) {
         console.error("[FoundryClient] Received Engine.IO handshake, sending Socket.IO connect");
-        ws.send("40");
+        this.sendWebSocketMessage(ws, "40");
         return;
       }
 
@@ -447,13 +451,21 @@ export class FoundryClient {
   }
 
   /**
+   * Internal method to send WebSocket messages with logging
+   */
+  private sendWebSocketMessage(ws: WebSocket, data: string | Buffer): void {
+    this.wsLogger.logOutbound(data);
+    ws.send(data);
+  }
+
+  /**
    * Send a message through the WebSocket
    */
   send(data: string | Buffer): void {
     if (!this.connection || this.connection.ws.readyState !== WebSocket.OPEN) {
       throw new Error("Not connected to Foundry server");
     }
-    this.connection.ws.send(data);
+    this.sendWebSocketMessage(this.connection.ws, data);
   }
 
   /**
@@ -545,7 +557,7 @@ export class FoundryClient {
 
       // Send the world request
       console.error("[FoundryClient] Requesting world data...");
-      ws.send('420["world"]');
+      this.sendWebSocketMessage(ws, '420["world"]');
     });
   }
 
@@ -757,7 +769,7 @@ export class FoundryClient {
       // Send the modifyDocument request
       const messageStr = `42${ackId}${JSON.stringify(payload)}`;
       console.error(`[FoundryClient] Sending modifyDocument: ${messageStr}`);
-      ws.send(messageStr);
+      this.sendWebSocketMessage(ws, messageStr);
     });
   }
 
@@ -843,7 +855,7 @@ export class FoundryClient {
       // Send the createDocument request
       const messageStr = `42${ackId}${JSON.stringify(payload)}`;
       console.error(`[FoundryClient] Sending createDocument: ${messageStr}`);
-      ws.send(messageStr);
+      this.sendWebSocketMessage(ws, messageStr);
     });
   }
 
@@ -937,7 +949,7 @@ export class FoundryClient {
       // Send the deleteDocument request
       const messageStr = `42${ackId}${JSON.stringify(payload)}`;
       console.error(`[FoundryClient] Sending deleteDocument: ${messageStr}`);
-      ws.send(messageStr);
+      this.sendWebSocketMessage(ws, messageStr);
     });
   }
 
@@ -1017,5 +1029,6 @@ export class FoundryClient {
       this.connection.ws.close();
       this.connection = null;
     }
+    this.wsLogger.close();
   }
 }
