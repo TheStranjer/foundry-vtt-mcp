@@ -12,8 +12,27 @@ export class WebSocketLogger {
   private logFilePath: string | null = null;
   private enabled: boolean = false;
   private sessionId: string;
+  private fs: Pick<typeof fs, "existsSync" | "mkdirSync" | "appendFileSync">;
+  private path: Pick<typeof path, "join">;
+  private env: NodeJS.ProcessEnv;
+  private nowFn: () => Date;
+  private randomFn: () => number;
+  private logger: { error: (...args: unknown[]) => void };
 
-  constructor() {
+  constructor(deps: {
+    fs?: Pick<typeof fs, "existsSync" | "mkdirSync" | "appendFileSync">;
+    path?: Pick<typeof path, "join">;
+    env?: NodeJS.ProcessEnv;
+    nowFn?: () => Date;
+    randomFn?: () => number;
+    logger?: { error: (...args: unknown[]) => void };
+  } = {}) {
+    this.fs = deps.fs || fs;
+    this.path = deps.path || path;
+    this.env = deps.env || process.env;
+    this.nowFn = deps.nowFn || (() => new Date());
+    this.randomFn = deps.randomFn || Math.random;
+    this.logger = deps.logger || console;
     this.sessionId = this.generateSessionId();
     this.initialize();
   }
@@ -22,9 +41,9 @@ export class WebSocketLogger {
    * Generate a unique session ID using timestamp and random suffix
    */
   private generateSessionId(): string {
-    const now = new Date();
+    const now = this.nowFn();
     const timestamp = now.toISOString().replace(/[:.]/g, "-");
-    const random = Math.random().toString(36).substring(2, 8);
+    const random = this.randomFn().toString(36).substring(2, 8);
     return `${timestamp}_${random}`;
   }
 
@@ -32,32 +51,32 @@ export class WebSocketLogger {
    * Initialize the logger by checking for WEBSOCKETS_DIRECTORY env var
    */
   private initialize(): void {
-    const wsDir = process.env.WEBSOCKETS_DIRECTORY;
+    const wsDir = this.env.WEBSOCKETS_DIRECTORY;
 
     if (!wsDir) {
-      console.error("[WebSocketLogger] WEBSOCKETS_DIRECTORY not set, logging disabled");
+      this.logger.error("[WebSocketLogger] WEBSOCKETS_DIRECTORY not set, logging disabled");
       return;
     }
 
     try {
       // Ensure directory exists
-      if (!fs.existsSync(wsDir)) {
-        fs.mkdirSync(wsDir, { recursive: true });
-        console.error(`[WebSocketLogger] Created directory: ${wsDir}`);
+      if (!this.fs.existsSync(wsDir)) {
+        this.fs.mkdirSync(wsDir, { recursive: true });
+        this.logger.error(`[WebSocketLogger] Created directory: ${wsDir}`);
       }
 
       // Create log file path
       const logFileName = `ws_session_${this.sessionId}.log`;
-      this.logFilePath = path.join(wsDir, logFileName);
+      this.logFilePath = this.path.join(wsDir, logFileName);
       this.enabled = true;
 
       // Write session header (sync for immediate flush)
-      const header = `=== WebSocket Session Started ===\nSession ID: ${this.sessionId}\nTimestamp: ${new Date().toISOString()}\n${"=".repeat(40)}\n\n`;
-      fs.appendFileSync(this.logFilePath, header);
+      const header = `=== WebSocket Session Started ===\nSession ID: ${this.sessionId}\nTimestamp: ${this.nowFn().toISOString()}\n${"=".repeat(40)}\n\n`;
+      this.fs.appendFileSync(this.logFilePath, header);
 
-      console.error(`[WebSocketLogger] Logging to: ${this.logFilePath}`);
+      this.logger.error(`[WebSocketLogger] Logging to: ${this.logFilePath}`);
     } catch (error) {
-      console.error(`[WebSocketLogger] Failed to initialize: ${error}`);
+      this.logger.error(`[WebSocketLogger] Failed to initialize: ${error}`);
       this.enabled = false;
     }
   }
@@ -69,10 +88,10 @@ export class WebSocketLogger {
     if (!this.enabled || !this.logFilePath) return;
 
     const msgStr = message instanceof Buffer ? message.toString() : message;
-    const timestamp = new Date().toISOString();
+    const timestamp = this.nowFn().toISOString();
     const entry = `[${timestamp}] >>> OUTBOUND >>>\n${msgStr}\n\n`;
 
-    fs.appendFileSync(this.logFilePath, entry);
+    this.fs.appendFileSync(this.logFilePath, entry);
   }
 
   /**
@@ -82,10 +101,10 @@ export class WebSocketLogger {
     if (!this.enabled || !this.logFilePath) return;
 
     const msgStr = message instanceof Buffer ? message.toString() : message;
-    const timestamp = new Date().toISOString();
+    const timestamp = this.nowFn().toISOString();
     const entry = `[${timestamp}] <<< INBOUND <<<\n${msgStr}\n\n`;
 
-    fs.appendFileSync(this.logFilePath, entry);
+    this.fs.appendFileSync(this.logFilePath, entry);
   }
 
   /**
@@ -100,8 +119,8 @@ export class WebSocketLogger {
    */
   close(): void {
     if (this.enabled && this.logFilePath) {
-      const footer = `\n${"=".repeat(40)}\n=== WebSocket Session Ended ===\nTimestamp: ${new Date().toISOString()}\n`;
-      fs.appendFileSync(this.logFilePath, footer);
+      const footer = `\n${"=".repeat(40)}\n=== WebSocket Session Ended ===\nTimestamp: ${this.nowFn().toISOString()}\n`;
+      this.fs.appendFileSync(this.logFilePath, footer);
       this.logFilePath = null;
       this.enabled = false;
     }

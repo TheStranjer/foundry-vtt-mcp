@@ -1,0 +1,583 @@
+import { EventEmitter } from "events";
+import { FoundryClient } from "../src/foundry-client.js";
+import type { FoundryCredential } from "../src/core/credentials.js";
+
+class TestWebSocket extends EventEmitter {
+  static OPEN = 1;
+  url: string;
+  readyState = TestWebSocket.OPEN;
+  send = jest.fn();
+  close = jest.fn(() => {
+    this.readyState = 3;
+  });
+
+  constructor(url: string) {
+    super();
+    this.url = url;
+  }
+}
+
+function createHttpsStub(responder: (req: EventEmitter, callback: (res: any) => void) => void) {
+  return {
+    request: jest.fn((options: any, callback: (res: any) => void) => {
+      const req = new EventEmitter() as EventEmitter & { write: jest.Mock; end: jest.Mock };
+      req.write = jest.fn();
+      req.end = jest.fn(() => responder(req, callback));
+      return req;
+    }),
+  };
+}
+
+function createClient(overrides: Record<string, unknown> = {}) {
+  const logger = { error: jest.fn() };
+  const wsLogger = { logInbound: jest.fn(), logOutbound: jest.fn(), close: jest.fn() } as any;
+  const deps = {
+    logger,
+    wsLogger,
+    ...overrides,
+  };
+  const client = new FoundryClient("/tmp/creds.json", deps as any);
+  return { client, logger, wsLogger };
+}
+
+describe("FoundryClient", () => {
+  test("loadCredentials parses config", () => {
+    const creds = [
+      { _id: "a", hostname: "h", password: "p", userid: "u" },
+    ];
+    const { client } = createClient({
+      fs: { readFileSync: jest.fn(() => JSON.stringify(creds)) },
+    });
+
+    const loaded = (client as any).loadCredentials();
+    expect(loaded).toEqual(creds);
+  });
+
+  test("loadCredentials wraps errors", () => {
+    const { client } = createClient({
+      fs: { readFileSync: jest.fn(() => { throw new Error("nope"); }) },
+    });
+
+    expect(() => (client as any).loadCredentials())
+      .toThrow("Failed to load credentials");
+  });
+
+  test("getSession uses cookie when available", async () => {
+    const https = createHttpsStub((_, callback) => {
+      const res = new EventEmitter() as any;
+      res.headers = { "set-cookie": ["session=abc123; Path=/"] };
+      callback(res);
+    });
+    const { client } = createClient({ https });
+
+    const sessionId = await (client as any).getSession("host");
+    expect(sessionId).toBe("abc123");
+  });
+
+  test("getSession generates when no cookie", async () => {
+    const https = createHttpsStub((_, callback) => {
+      const res = new EventEmitter() as any;
+      res.headers = {};
+      callback(res);
+    });
+    const { client } = createClient({
+      https,
+      crypto: { randomBytes: jest.fn(() => Buffer.alloc(12, 1)) },
+    });
+
+    const sessionId = await (client as any).getSession("host");
+    expect(sessionId).toBe(Buffer.alloc(12, 1).toString("hex"));
+  });
+
+  test("getSession rejects on request error", async () => {
+    const https = {
+      request: jest.fn((_options: any, _callback: any) => {
+        const req = new EventEmitter() as EventEmitter & { end: jest.Mock };
+        req.end = jest.fn(() => req.emit("error", new Error("fail")));
+        return req;
+      }),
+    };
+    const { client } = createClient({ https });
+
+    await expect((client as any).getSession("host"))
+      .rejects.toThrow("GET /join failed for host");
+  });
+
+  test("authenticate returns true on success", async () => {
+    const https = createHttpsStub((req, callback) => {
+      const res = new EventEmitter() as any;
+      res.statusCode = 200;
+      callback(res);
+      res.emit("data", JSON.stringify({ status: "success", message: "ok" }));
+      res.emit("end");
+      expect((req as any).write).toHaveBeenCalled();
+    });
+    const { client } = createClient({ https });
+
+    const success = await (client as any).authenticate("host", "sid", {
+      _id: "x",
+      hostname: "host",
+      password: "pw",
+      userid: "user",
+    });
+    expect(success).toBe(true);
+  });
+
+  test("authenticate returns false on failure", async () => {
+    const https = createHttpsStub((_req, callback) => {
+      const res = new EventEmitter() as any;
+      res.statusCode = 401;
+      callback(res);
+      res.emit("data", "nope");
+      res.emit("end");
+    });
+    const { client } = createClient({ https });
+
+    const success = await (client as any).authenticate("host", "sid", {
+      _id: "x",
+      hostname: "host",
+      password: "pw",
+      userid: "user",
+    });
+    expect(success).toBe(false);
+  });
+
+  test("authenticate rejects on request error", async () => {
+    const https = {
+      request: jest.fn((_options: any, _callback: any) => {
+        const req = new EventEmitter() as EventEmitter & { write: jest.Mock; end: jest.Mock };
+        req.write = jest.fn();
+        req.end = jest.fn(() => req.emit("error", new Error("fail")));
+        return req;
+      }),
+    };
+    const { client } = createClient({ https });
+
+    await expect((client as any).authenticate("host", "sid", {
+      _id: "x",
+      hostname: "host",
+      password: "pw",
+      userid: "user",
+    })).rejects.toThrow("POST /join failed for host");
+  });
+
+  test("connectWebSocket resolves on open", async () => {
+    jest.useFakeTimers();
+    let created: TestWebSocket | null = null;
+    class Ws extends TestWebSocket {
+      constructor(url: string) {
+        super(url);
+        created = this;
+      }
+    }
+
+    const { client } = createClient({ WebSocketCtor: Ws });
+    const promise = (client as any).connectWebSocket("host", "sid");
+    created?.emit("open");
+    await expect(promise).resolves.toBe(created);
+    jest.useRealTimers();
+  });
+
+  test("connectWebSocket rejects on error", async () => {
+    jest.useFakeTimers();
+    let created: TestWebSocket | null = null;
+    class Ws extends TestWebSocket {
+      constructor(url: string) {
+        super(url);
+        created = this;
+      }
+    }
+
+    const { client } = createClient({ WebSocketCtor: Ws });
+    const promise = (client as any).connectWebSocket("host", "sid");
+    created?.emit("error", new Error("boom"));
+    await expect(promise).rejects.toThrow("WebSocket connection failed");
+    jest.useRealTimers();
+  });
+
+  test("connectWebSocket times out", async () => {
+    jest.useFakeTimers();
+    class Ws extends TestWebSocket {}
+    const { client } = createClient({ WebSocketCtor: Ws });
+
+    const promise = (client as any).connectWebSocket("host", "sid");
+    jest.advanceTimersByTime(10000);
+
+    await expect(promise).rejects.toThrow("WebSocket connection timeout");
+    jest.useRealTimers();
+  });
+
+  test("setupWebSocketHandlers responds to handshake", () => {
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+    (client as any).setupWebSocketHandlers(ws);
+
+    ws.emit("message", "0{\"sid\":\"x\"}");
+
+    expect(ws.send).toHaveBeenCalledWith("40");
+  });
+
+  test("setupWebSocketHandlers ignores session event", () => {
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+    (client as any).setupWebSocketHandlers(ws);
+
+    ws.emit("message", "42[\"session\",{}]");
+
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+
+  test("setupWebSocketHandlers triggers reconnect on close", () => {
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+    (client as any).connection = {
+      hostname: "host",
+      credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+      sessionId: "sid",
+      ws,
+    };
+
+    const reconnect = jest.spyOn(client as any, "reconnect").mockResolvedValue(undefined);
+    (client as any).setupWebSocketHandlers(ws);
+    ws.emit("close", 1000, Buffer.from("bye"));
+
+    expect(reconnect).toHaveBeenCalled();
+  });
+
+  test("reconnect handles success and fallbacks", async () => {
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+    (client as any).connection = {
+      hostname: "host",
+      credential: { _id: "c", hostname: "host", password: "p", userid: "u" },
+      sessionId: "sid",
+      ws,
+    };
+
+    const authenticate = jest
+      .spyOn(client as any, "authenticate")
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const getSession = jest
+      .spyOn(client as any, "getSession")
+      .mockResolvedValue("newSid");
+    const connectWebSocket = jest
+      .spyOn(client as any, "connectWebSocket")
+      .mockResolvedValue(new TestWebSocket("ws://host"));
+
+    await (client as any).reconnect();
+
+    expect(authenticate).toHaveBeenCalledTimes(2);
+    expect(getSession).toHaveBeenCalled();
+    expect(connectWebSocket).toHaveBeenCalled();
+  });
+
+  test("connect throws when no credentials", async () => {
+    const { client } = createClient({ fs: { readFileSync: jest.fn(() => "[]") } });
+    await expect(client.connect()).rejects.toThrow("No credentials found in config file");
+  });
+
+  test("connect tries credentials until success", async () => {
+    const creds = [
+      { _id: "a", hostname: "a", password: "p", userid: "u" },
+      { _id: "b", hostname: "b", password: "p", userid: "u" },
+    ];
+    const { client } = createClient({ fs: { readFileSync: jest.fn(() => JSON.stringify(creds)) } });
+
+    jest.spyOn(client as any, "getSession").mockResolvedValue("sid");
+    jest.spyOn(client as any, "authenticate")
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    jest.spyOn(client as any, "connectWebSocket")
+      .mockResolvedValue(new TestWebSocket("ws://b"));
+    jest.spyOn(client as any, "setupWebSocketHandlers").mockImplementation(() => undefined);
+
+    await client.connect();
+    expect(client.getHostname()).toBe("b");
+  });
+
+  test("connect fails when all credentials fail", async () => {
+    const creds = [{ _id: "a", hostname: "a", password: "p", userid: "u" }];
+    const { client } = createClient({ fs: { readFileSync: jest.fn(() => JSON.stringify(creds)) } });
+
+    jest.spyOn(client as any, "getSession").mockResolvedValue("sid");
+    jest.spyOn(client as any, "authenticate").mockResolvedValue(false);
+
+    await expect(client.connect()).rejects.toThrow("Failed to connect to any Foundry server");
+  });
+
+  test("chooseFoundryInstance switches connection", async () => {
+    const creds = [
+      { _id: "a", hostname: "a", password: "p", userid: "u" },
+      { _id: "b", hostname: "b", password: "p", userid: "u" },
+    ];
+    const { client } = createClient({ fs: { readFileSync: jest.fn(() => JSON.stringify(creds)) } });
+
+    const oldWs = new TestWebSocket("ws://a");
+    (client as any).connection = {
+      hostname: "a",
+      credential: creds[0],
+      sessionId: "sid",
+      ws: oldWs,
+    };
+
+    jest.spyOn(client as any, "getSession").mockResolvedValue("sid");
+    jest.spyOn(client as any, "authenticate").mockResolvedValue(true);
+    jest.spyOn(client as any, "connectWebSocket").mockResolvedValue(new TestWebSocket("ws://b"));
+    jest.spyOn(client as any, "setupWebSocketHandlers").mockImplementation(() => undefined);
+
+    await client.chooseFoundryInstance({ item_order: 1 });
+
+    expect(oldWs.close).toHaveBeenCalled();
+    expect(client.getHostname()).toBe("b");
+  });
+
+  test("getDocuments validates collection", async () => {
+    const { client } = createClient();
+    jest.spyOn(client, "requestWorldData").mockResolvedValue({});
+
+    await expect(client.getDocuments("actors"))
+      .rejects.toThrow("Response does not contain actors array");
+  });
+
+  test("getDocuments filters and truncates", async () => {
+    const { client } = createClient();
+    jest.spyOn(client, "requestWorldData").mockResolvedValue({
+      actors: [
+        { _id: "1", name: "A", type: "npc" },
+        { _id: "2", name: "B", type: "pc" },
+      ],
+    });
+
+    const docs = await client.getDocuments("actors", {
+      requestedFields: ["type"],
+      where: { type: "npc" },
+      maxLength: 1000,
+    });
+
+    expect(docs).toEqual([{ _id: "1", name: "A", type: "npc" }]);
+  });
+
+  test("getDocument resolves by id and name", async () => {
+    const { client } = createClient();
+    jest.spyOn(client, "requestWorldData").mockResolvedValue({
+      items: [
+        { _id: "1", id: "1", name: "A" },
+        { _id: "2", id: "2", name: "B" },
+      ],
+    });
+
+    await expect(client.getDocument("items", { id: "1" }))
+      .resolves.toEqual({ _id: "1", id: "1", name: "A" });
+    await expect(client.getDocument("items", { _id: "2" }))
+      .resolves.toEqual({ _id: "2", id: "2", name: "B" });
+    await expect(client.getDocument("items", { name: "B" }))
+      .resolves.toEqual({ _id: "2", id: "2", name: "B" });
+  });
+
+  test("getDocument returns null when missing", async () => {
+    const { client } = createClient();
+    jest.spyOn(client, "requestWorldData").mockResolvedValue({ items: [] });
+
+    await expect(client.getDocument("items", { name: "Missing" }))
+      .resolves.toBeNull();
+  });
+
+  test("modifyDocument builds operation", async () => {
+    const { client } = createClient({ now: () => 123, WebSocketCtor: TestWebSocket });
+    jest.spyOn(client as any, "sendModifyDocumentRequest")
+      .mockResolvedValue({ ok: true });
+
+    const result = await client.modifyDocument("Actor", "1", [{ name: "x" }], { parentUuid: "Scene.1" });
+
+    expect(result).toEqual({ ok: true });
+    expect((client as any).sendModifyDocumentRequest).toHaveBeenCalledWith(
+      "Actor",
+      "update",
+      expect.objectContaining({ parentUuid: "Scene.1", modifiedTime: 123 }),
+      expect.any(String),
+      expect.any(Function),
+      "modifyDocument"
+    );
+  });
+
+  test("createDocument builds operation", async () => {
+    const { client } = createClient({ now: () => 456, WebSocketCtor: TestWebSocket });
+    jest.spyOn(client as any, "sendModifyDocumentRequest")
+      .mockResolvedValue({ ok: true });
+
+    await client.createDocument("Actor", [{ name: "x" }]);
+
+    expect((client as any).sendModifyDocumentRequest).toHaveBeenCalledWith(
+      "Actor",
+      "create",
+      expect.objectContaining({ modifiedTime: 456 }),
+      expect.any(String),
+      expect.any(Function),
+      "createDocument"
+    );
+  });
+
+  test("deleteDocument builds operation", async () => {
+    const { client } = createClient({ now: () => 789, WebSocketCtor: TestWebSocket });
+    jest.spyOn(client as any, "sendModifyDocumentRequest")
+      .mockResolvedValue({ ok: true });
+
+    await client.deleteDocument("Actor", ["1"]);
+
+    expect((client as any).sendModifyDocumentRequest).toHaveBeenCalledWith(
+      "Actor",
+      "delete",
+      expect.objectContaining({ modifiedTime: 789 }),
+      expect.any(String),
+      expect.any(Function),
+      "deleteDocument"
+    );
+  });
+
+  test("requestWorldData resolves on world message", async () => {
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+    (client as any).connection = {
+      hostname: "host",
+      credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+      sessionId: "sid",
+      ws,
+    };
+
+    const promise = client.requestWorldData();
+    ws.emit("message", "430" + JSON.stringify([{ ok: true }]));
+
+    await expect(promise).resolves.toEqual({ ok: true });
+    expect(ws.send).toHaveBeenCalledWith('420["world"]');
+  });
+
+  test("requestWorldData rejects when not connected", async () => {
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    await expect(client.requestWorldData())
+      .rejects.toThrow("Not connected to Foundry server");
+  });
+
+  test("requestWorldData rejects on parse error", async () => {
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+    (client as any).connection = {
+      hostname: "host",
+      credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+      sessionId: "sid",
+      ws,
+    };
+
+    const promise = client.requestWorldData();
+    ws.emit("message", "430not-json");
+
+    await expect(promise).rejects.toThrow("Failed to parse world response");
+  });
+
+  test("sendModifyDocumentRequest resolves on match", async () => {
+    jest.useFakeTimers();
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+    (client as any).connection = {
+      hostname: "host",
+      credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+      sessionId: "sid",
+      ws,
+    };
+
+    const promise = (client as any).sendModifyDocumentRequest(
+      "Actor",
+      "update",
+      { updates: [] },
+      "timeout",
+      (data: Record<string, unknown>) => data.action === "update",
+      "modifyDocument"
+    );
+
+    ws.emit("message", "43" + JSON.stringify([{ type: "Actor", action: "update", result: [] }]));
+
+    await expect(promise).resolves.toEqual({ type: "Actor", action: "update", result: [] });
+    jest.useRealTimers();
+  });
+
+  test("sendModifyDocumentRequest ignores mismatched type and handles error payload", async () => {
+    jest.useFakeTimers();
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+    (client as any).connection = {
+      hostname: "host",
+      credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+      sessionId: "sid",
+      ws,
+    };
+
+    const promise = (client as any).sendModifyDocumentRequest(
+      "Actor",
+      "update",
+      { updates: [] },
+      "timeout",
+      () => false,
+      "modifyDocument"
+    );
+
+    ws.emit("message", "43" + JSON.stringify([{ type: "Other", action: "update", result: [] }]));
+    ws.emit("message", "43" + JSON.stringify([{ type: "Actor", error: "bad" }]));
+
+    await expect(promise).resolves.toEqual({ type: "Actor", error: "bad" });
+    jest.useRealTimers();
+  });
+
+  test("sendModifyDocumentRequest times out", async () => {
+    jest.useFakeTimers();
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+    (client as any).connection = {
+      hostname: "host",
+      credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+      sessionId: "sid",
+      ws,
+    };
+
+    const promise = (client as any).sendModifyDocumentRequest(
+      "Actor",
+      "update",
+      { updates: [] },
+      "timeout",
+      () => true,
+      "modifyDocument"
+    );
+
+    jest.advanceTimersByTime(30000);
+    await expect(promise).rejects.toThrow("timeout");
+    jest.useRealTimers();
+  });
+
+  test("getWorld filters collections", async () => {
+    const { client } = createClient();
+    jest.spyOn(client, "requestWorldData").mockResolvedValue({ actors: [], meta: { title: "x" } });
+
+    await expect(client.getWorld(["actors"]))
+      .resolves.toEqual({ meta: { title: "x" } });
+  });
+
+  test("send throws when not connected", () => {
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    expect(() => client.send("hi")).toThrow("Not connected to Foundry server");
+  });
+
+  test("disconnect closes ws and logger", () => {
+    const { client, wsLogger } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+    (client as any).connection = {
+      hostname: "host",
+      credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+      sessionId: "sid",
+      ws,
+    };
+
+    client.disconnect();
+
+    expect(ws.close).toHaveBeenCalled();
+    expect(wsLogger.close).toHaveBeenCalled();
+  });
+});
