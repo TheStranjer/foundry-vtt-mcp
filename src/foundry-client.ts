@@ -561,6 +561,106 @@ export class FoundryClient {
     });
   }
 
+  private buildDocumentOperation(
+    base: Record<string, unknown>,
+    options?: { parentUuid?: string }
+  ): Record<string, unknown> {
+    if (!options?.parentUuid) {
+      return base;
+    }
+
+    return {
+      ...base,
+      parentUuid: options.parentUuid,
+    };
+  }
+
+  private async sendModifyDocumentRequest(
+    type: string,
+    action: "update" | "create" | "delete",
+    operation: Record<string, unknown>,
+    timeoutMessage: string,
+    isMatch: (responseData: Record<string, unknown>) => boolean,
+    logLabel = "modifyDocument"
+  ): Promise<Record<string, unknown>> {
+    if (!this.connection || this.connection.ws.readyState !== WebSocket.OPEN) {
+      throw new Error("Not connected to Foundry server");
+    }
+
+    const ws = this.connection.ws;
+    const ackId = this.messageCounter++;
+    const payload = [
+      "modifyDocument",
+      {
+        type,
+        action,
+        operation,
+      },
+    ];
+
+    return new Promise((resolve, reject) => {
+      const finishResolve = (responseData: Record<string, unknown>) => {
+        clearTimeout(timeout);
+        ws.off("message", messageHandler);
+        resolve(responseData);
+      };
+
+      const timeout = setTimeout(() => {
+        ws.off("message", messageHandler);
+        reject(new Error(timeoutMessage));
+      }, 30000);
+
+      const messageHandler = (data: WebSocket.Data) => {
+        const message = data.toString();
+
+        // Look for Socket.IO ack response: 43{id}[...]
+        if (message.startsWith("43")) {
+          try {
+            // Find where the JSON array starts
+            const jsonStart = message.indexOf("[");
+            if (jsonStart === -1) return;
+
+            const jsonPart = message.slice(jsonStart);
+            const responseArray = JSON.parse(jsonPart) as unknown[];
+
+            if (!Array.isArray(responseArray) || responseArray.length === 0) {
+              return;
+            }
+
+            const responseData = responseArray[0] as Record<string, unknown>;
+
+            // Check if this response matches our request by type
+            if (responseData.type !== type) {
+              return;
+            }
+
+            // Check if this is an error response - return it immediately
+            if (responseData.error) {
+              finishResolve(responseData);
+              return;
+            }
+
+            if (!isMatch(responseData)) {
+              return;
+            }
+
+            // This is our response
+            finishResolve(responseData);
+          } catch (error) {
+            // Parse error, not our message, continue waiting
+          }
+        }
+      };
+
+      ws.on("message", messageHandler);
+
+      // Send the modifyDocument request
+      const messageStr = `42${ackId}${JSON.stringify(payload)}`;
+      console.error(`[FoundryClient] Sending ${logLabel}: ${messageStr}`);
+      this.sendWebSocketMessage(ws, messageStr);
+    });
+  }
+
   /** Valid document collection names in FoundryVTT */
   static readonly DOCUMENT_COLLECTIONS = ["actors", "items", "folders", "users", "scenes", "journal"] as const;
 
@@ -683,13 +783,6 @@ export class FoundryClient {
     updates: Record<string, unknown>[],
     options?: { parentUuid?: string }
   ): Promise<Record<string, unknown>> {
-    if (!this.connection || this.connection.ws.readyState !== WebSocket.OPEN) {
-      throw new Error("Not connected to Foundry server");
-    }
-
-    const ws = this.connection.ws;
-    const ackId = this.messageCounter++;
-
     // Ensure each update object has the _id
     const updatesWithId = updates.map((update) => ({
       ...update,
@@ -697,96 +790,34 @@ export class FoundryClient {
     }));
 
     // Build operation object with optional parentUuid
-    const operation: Record<string, unknown> = {
-      diff: false,
-      pack: null,
-      updates: updatesWithId,
-      action: "update",
-      modifiedTime: Date.now(),
-      recursive: true,
-      render: true,
-    };
-
-    // Add parentUuid if provided (for embedded documents like Drawings in a Scene)
-    if (options?.parentUuid) {
-      operation.parentUuid = options.parentUuid;
-    }
-
-    const payload = [
-      "modifyDocument",
+    const operation = this.buildDocumentOperation(
       {
-        type,
+        diff: false,
+        pack: null,
+        updates: updatesWithId,
         action: "update",
-        operation,
+        modifiedTime: Date.now(),
+        recursive: true,
+        render: true,
       },
-    ];
+      options
+    );
 
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        ws.off("message", messageHandler);
-        reject(new Error(`Timeout waiting for modifyDocument response (30s) for ${type} ${_id}`));
-      }, 30000);
-
-      const messageHandler = (data: WebSocket.Data) => {
-        const message = data.toString();
-
-        // Look for Socket.IO ack response: 43{id}[...]
-        if (message.startsWith("43")) {
-          try {
-            // Find where the JSON array starts
-            const jsonStart = message.indexOf("[");
-            if (jsonStart === -1) return;
-
-            const jsonPart = message.slice(jsonStart);
-            const responseArray = JSON.parse(jsonPart) as unknown[];
-
-            if (!Array.isArray(responseArray) || responseArray.length === 0) {
-              return;
-            }
-
-            const responseData = responseArray[0] as Record<string, unknown>;
-
-            // Check if this response matches our request by type
-            if (responseData.type !== type) {
-              return;
-            }
-
-            // Check if this is an error response - return it immediately
-            if (responseData.error) {
-              clearTimeout(timeout);
-              ws.off("message", messageHandler);
-              resolve(responseData);
-              return;
-            }
-
-            // Check if the result contains our _id
-            const result = responseData.result as Record<string, unknown>[] | undefined;
-            if (!result || !Array.isArray(result)) {
-              return;
-            }
-
-            const hasMatchingId = result.some((r) => r._id === _id);
-            if (!hasMatchingId) {
-              return;
-            }
-
-            // This is our response
-            clearTimeout(timeout);
-            ws.off("message", messageHandler);
-            resolve(responseData);
-          } catch (error) {
-            // Parse error, not our message, continue waiting
-          }
+    return this.sendModifyDocumentRequest(
+      type,
+      "update",
+      operation,
+      `Timeout waiting for modifyDocument response (30s) for ${type} ${_id}`,
+      (responseData) => {
+        const result = responseData.result as Record<string, unknown>[] | undefined;
+        if (!result || !Array.isArray(result)) {
+          return false;
         }
-      };
 
-      ws.on("message", messageHandler);
-
-      // Send the modifyDocument request
-      const messageStr = `42${ackId}${JSON.stringify(payload)}`;
-      console.error(`[FoundryClient] Sending modifyDocument: ${messageStr}`);
-      this.sendWebSocketMessage(ws, messageStr);
-    });
+        return result.some((r) => r._id === _id);
+      },
+      "modifyDocument"
+    );
   }
 
   /**
@@ -803,92 +834,27 @@ export class FoundryClient {
     data: Record<string, unknown>[],
     options?: { parentUuid?: string }
   ): Promise<Record<string, unknown>> {
-    if (!this.connection || this.connection.ws.readyState !== WebSocket.OPEN) {
-      throw new Error("Not connected to Foundry server");
-    }
-
-    const ws = this.connection.ws;
-    const ackId = this.messageCounter++;
-
     // Build operation object with optional parentUuid
-    const operation: Record<string, unknown> = {
-      pack: null,
-      data,
-      action: "create",
-      modifiedTime: Date.now(),
-      renderSheet: true,
-      render: true,
-    };
-
-    // Add parentUuid if provided (for embedded documents like Drawings in a Scene)
-    if (options?.parentUuid) {
-      operation.parentUuid = options.parentUuid;
-    }
-
-    const payload = [
-      "modifyDocument",
+    const operation = this.buildDocumentOperation(
       {
-        type,
+        pack: null,
+        data,
         action: "create",
-        operation,
+        modifiedTime: Date.now(),
+        renderSheet: true,
+        render: true,
       },
-    ];
+      options
+    );
 
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        ws.off("message", messageHandler);
-        reject(new Error(`Timeout waiting for createDocument response (30s) for ${type}`));
-      }, 30000);
-
-      const messageHandler = (data: WebSocket.Data) => {
-        const message = data.toString();
-
-        // Look for Socket.IO ack response: 43{id}[...]
-        if (message.startsWith("43")) {
-          try {
-            // Find where the JSON array starts
-            const jsonStart = message.indexOf("[");
-            if (jsonStart === -1) return;
-
-            const jsonPart = message.slice(jsonStart);
-            const responseArray = JSON.parse(jsonPart) as unknown[];
-
-            if (!Array.isArray(responseArray) || responseArray.length === 0) {
-              return;
-            }
-
-            const responseData = responseArray[0] as Record<string, unknown>;
-
-            // Check if this response matches our request by type and action
-            if (responseData.type !== type || responseData.action !== "create") {
-              return;
-            }
-
-            // Check if this is an error response - return it immediately
-            if (responseData.error) {
-              clearTimeout(timeout);
-              ws.off("message", messageHandler);
-              resolve(responseData);
-              return;
-            }
-
-            // This is our response
-            clearTimeout(timeout);
-            ws.off("message", messageHandler);
-            resolve(responseData);
-          } catch (error) {
-            // Parse error, not our message, continue waiting
-          }
-        }
-      };
-
-      ws.on("message", messageHandler);
-
-      // Send the createDocument request
-      const messageStr = `42${ackId}${JSON.stringify(payload)}`;
-      console.error(`[FoundryClient] Sending createDocument: ${messageStr}`);
-      this.sendWebSocketMessage(ws, messageStr);
-    });
+    return this.sendModifyDocumentRequest(
+      type,
+      "create",
+      operation,
+      `Timeout waiting for createDocument response (30s) for ${type}`,
+      (responseData) => responseData.action === "create",
+      "createDocument"
+    );
   }
 
   /**
@@ -902,103 +868,38 @@ export class FoundryClient {
     ids: string[],
     options?: { parentUuid?: string }
   ): Promise<Record<string, unknown>> {
-    if (!this.connection || this.connection.ws.readyState !== WebSocket.OPEN) {
-      throw new Error("Not connected to Foundry server");
-    }
-
-    const ws = this.connection.ws;
-    const ackId = this.messageCounter++;
-
     // Build operation object with optional parentUuid
-    const operation: Record<string, unknown> = {
-      pack: null,
-      ids,
-      action: "delete",
-      modifiedTime: Date.now(),
-      deleteAll: false,
-      render: true,
-    };
-
-    // Add parentUuid if provided (for embedded documents like Drawings in a Scene)
-    if (options?.parentUuid) {
-      operation.parentUuid = options.parentUuid;
-    }
-
-    const payload = [
-      "modifyDocument",
+    const operation = this.buildDocumentOperation(
       {
-        type,
+        pack: null,
+        ids,
         action: "delete",
-        operation,
+        modifiedTime: Date.now(),
+        deleteAll: false,
+        render: true,
       },
-    ];
+      options
+    );
 
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        ws.off("message", messageHandler);
-        reject(new Error(`Timeout waiting for deleteDocument response (30s) for ${type}`));
-      }, 30000);
-
-      const messageHandler = (data: WebSocket.Data) => {
-        const message = data.toString();
-
-        // Look for Socket.IO ack response: 43{id}[...]
-        if (message.startsWith("43")) {
-          try {
-            // Find where the JSON array starts
-            const jsonStart = message.indexOf("[");
-            if (jsonStart === -1) return;
-
-            const jsonPart = message.slice(jsonStart);
-            const responseArray = JSON.parse(jsonPart) as unknown[];
-
-            if (!Array.isArray(responseArray) || responseArray.length === 0) {
-              return;
-            }
-
-            const responseData = responseArray[0] as Record<string, unknown>;
-
-            // Check if this response matches our request by type and action
-            if (responseData.type !== type || responseData.action !== "delete") {
-              return;
-            }
-
-            // Check if this is an error response - return it immediately
-            if (responseData.error) {
-              clearTimeout(timeout);
-              ws.off("message", messageHandler);
-              resolve(responseData);
-              return;
-            }
-
-            // Check if the result contains at least one of our requested IDs
-            const result = responseData.result as string[] | undefined;
-            if (!result || !Array.isArray(result)) {
-              return;
-            }
-
-            const hasMatchingId = ids.some((id) => result.includes(id));
-            if (!hasMatchingId) {
-              return;
-            }
-
-            // This is our response
-            clearTimeout(timeout);
-            ws.off("message", messageHandler);
-            resolve(responseData);
-          } catch (error) {
-            // Parse error, not our message, continue waiting
-          }
+    return this.sendModifyDocumentRequest(
+      type,
+      "delete",
+      operation,
+      `Timeout waiting for deleteDocument response (30s) for ${type}`,
+      (responseData) => {
+        if (responseData.action !== "delete") {
+          return false;
         }
-      };
 
-      ws.on("message", messageHandler);
+        const result = responseData.result as string[] | undefined;
+        if (!result || !Array.isArray(result)) {
+          return false;
+        }
 
-      // Send the deleteDocument request
-      const messageStr = `42${ackId}${JSON.stringify(payload)}`;
-      console.error(`[FoundryClient] Sending deleteDocument: ${messageStr}`);
-      this.sendWebSocketMessage(ws, messageStr);
-    });
+        return ids.some((id) => result.includes(id));
+      },
+      "deleteDocument"
+    );
   }
 
   // Convenience methods for specific document types
