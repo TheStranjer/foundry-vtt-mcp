@@ -27,7 +27,7 @@ export function truncateDocuments(
     return docs;
   }
 
-  let result = [...docs];
+  const result = [...docs];
   while (result.length > 0) {
     const json = JSON.stringify(result);
     if (Buffer.byteLength(json, "utf-8") <= maxLength) {
