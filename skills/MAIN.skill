@@ -272,6 +272,7 @@ All drawings share these defaults (override as needed):
 | `strokeWidth` | `8` | |
 | `strokeColor` | `"#ffffff"` | |
 | `strokeAlpha` | `1` | |
+| `sort` | `1` | Shapes with a higher value are displayed on top of shapes with a lower value |
 | `bezierFactor` | `0.5` | Curve smoothing (0=sharp corners) |
 | `hidden` | `false` | GM-only visibility |
 | `locked` | `false` | Prevent editing |
