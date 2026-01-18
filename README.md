@@ -30,6 +30,10 @@ npm install
 npm run build
 ```
 
+## Skills
+
+The `./skills` directory contains LLM skills for this project. Currently the only skill there is `MAIN.skill`, and all users should install it because it includes the FoundryVTT-specific guidance and workflows. We welcome PRs that add skills for specific game systems, FoundryVTT modules, or other targeted use cases.
+
 ## Configuration
 
 ### Credentials File
