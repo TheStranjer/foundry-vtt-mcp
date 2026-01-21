@@ -225,6 +225,62 @@ export const chooseFoundryInstanceTool = {
   },
 };
 
+export const uploadFileTool = {
+  name: "upload_file",
+  description: `Upload a file to FoundryVTT. You must provide EXACTLY ONE of 'url' or 'image_data' (XOR logic). If you provide both or neither, the request will fail.
+
+- Use 'url' to download and upload a file from a remote URL (e.g., an image URL from the web)
+- Use 'image_data' to upload base64-encoded file content directly
+
+The file will be uploaded to the specified target directory in FoundryVTT's data storage.`,
+  inputSchema: {
+    type: "object",
+    properties: {
+      target: {
+        type: "string",
+        description: `The target directory path in FoundryVTT where the file should be uploaded. Example: "worlds/myworld/assets/avatars" or "worlds/myworld/assets/scenes"`,
+      },
+      filename: {
+        type: "string",
+        description: `The filename to use for the uploaded file (including extension). Example: "goblin-avatar.png"`,
+      },
+      url: {
+        type: "string",
+        description: `URL to download the file from. The file will be downloaded and then uploaded to FoundryVTT. Cannot be used together with 'image_data'.`,
+      },
+      image_data: {
+        type: "string",
+        description: `Base64-encoded file content to upload. Cannot be used together with 'url'.`,
+      },
+    },
+    required: ["target", "filename"],
+  },
+};
+
+export const browseFilesTool = {
+  name: "browse_files",
+  description: `Browse files and directories in FoundryVTT's file system. Returns a listing of directories and files at the specified target path, filtered by file type.`,
+  inputSchema: {
+    type: "object",
+    properties: {
+      target: {
+        type: "string",
+        description: `The target directory path to browse. Example: "worlds/myworld/assets" or "worlds/myworld/assets/avatars"`,
+      },
+      type: {
+        type: "string",
+        description: `The file type filter. Defaults to "image". Common values: "image", "audio", "video", "text"`,
+      },
+      extensions: {
+        type: "array",
+        items: { type: "string" },
+        description: `Array of file extensions to filter (with leading dot). Defaults to common image extensions: [".apng", ".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".tiff", ".webp"]`,
+      },
+    },
+    required: ["target"],
+  },
+};
+
 export function createToolDefinitions() {
   return [
     ...DOCUMENT_TYPES.flatMap((config) => [
@@ -237,6 +293,8 @@ export function createToolDefinitions() {
     deleteDocumentTool,
     showCredentialsTool,
     chooseFoundryInstanceTool,
+    uploadFileTool,
+    browseFilesTool,
   ];
 }
 
@@ -434,6 +492,57 @@ export function createToolHandler(foundryClient: FoundryClient) {
       } catch (error) {
         return errorResponse(
           `Error switching Foundry instance: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "upload_file") {
+      try {
+        const target = args?.target as string | undefined;
+        const filename = args?.filename as string | undefined;
+        const url = args?.url as string | undefined;
+        const imageData = args?.image_data as string | undefined;
+
+        if (!target) {
+          return errorResponse("Error: 'target' is required");
+        }
+        if (!filename) {
+          return errorResponse("Error: 'filename' is required");
+        }
+
+        const result = await foundryClient.uploadFile({
+          target,
+          filename,
+          url,
+          image_data: imageData,
+        });
+        return successResponse(result);
+      } catch (error) {
+        return errorResponse(
+          `Error uploading file: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "browse_files") {
+      try {
+        const target = args?.target as string | undefined;
+        const type = args?.type as string | undefined;
+        const extensions = args?.extensions as string[] | undefined;
+
+        if (!target) {
+          return errorResponse("Error: 'target' is required");
+        }
+
+        const result = await foundryClient.browseFiles({
+          target,
+          type,
+          extensions,
+        });
+        return successResponse(result);
+      } catch (error) {
+        return errorResponse(
+          `Error browsing files: ${error instanceof Error ? error.message : String(error)}`
         );
       }
     }

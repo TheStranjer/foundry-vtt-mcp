@@ -201,4 +201,209 @@ describe("server tools", () => {
     await expect(handler({ params: { name: "missing_tool" } }))
       .rejects.toThrow("Unknown tool");
   });
+
+  describe("upload_file", () => {
+    test("requires target", async () => {
+      const client = {
+        isConnected: () => true,
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "upload_file",
+          arguments: { filename: "test.png", image_data: "abc" },
+        },
+      });
+
+      expect((response as any).isError).toBe(true);
+      expect(response.content[0].text).toContain("'target' is required");
+    });
+
+    test("requires filename", async () => {
+      const client = {
+        isConnected: () => true,
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "upload_file",
+          arguments: { target: "worlds/test", image_data: "abc" },
+        },
+      });
+
+      expect((response as any).isError).toBe(true);
+      expect(response.content[0].text).toContain("'filename' is required");
+    });
+
+    test("executes successfully with image_data", async () => {
+      const client = {
+        isConnected: () => true,
+        uploadFile: jest.fn().mockResolvedValue({ path: "worlds/test/image.png" }),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "upload_file",
+          arguments: {
+            target: "worlds/test",
+            filename: "image.png",
+            image_data: "aGVsbG8=",
+          },
+        },
+      });
+
+      expect(client.uploadFile).toHaveBeenCalledWith({
+        target: "worlds/test",
+        filename: "image.png",
+        url: undefined,
+        image_data: "aGVsbG8=",
+      });
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("executes successfully with url", async () => {
+      const client = {
+        isConnected: () => true,
+        uploadFile: jest.fn().mockResolvedValue({ path: "worlds/test/image.png" }),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "upload_file",
+          arguments: {
+            target: "worlds/test",
+            filename: "image.png",
+            url: "https://example.com/image.png",
+          },
+        },
+      });
+
+      expect(client.uploadFile).toHaveBeenCalledWith({
+        target: "worlds/test",
+        filename: "image.png",
+        url: "https://example.com/image.png",
+        image_data: undefined,
+      });
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("returns error on failure", async () => {
+      const client = {
+        isConnected: () => true,
+        uploadFile: jest.fn().mockRejectedValue(new Error("Upload failed")),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "upload_file",
+          arguments: {
+            target: "worlds/test",
+            filename: "image.png",
+            image_data: "abc",
+          },
+        },
+      });
+
+      expect((response as any).isError).toBe(true);
+      expect(response.content[0].text).toContain("Upload failed");
+    });
+  });
+
+  describe("browse_files", () => {
+    test("requires target", async () => {
+      const client = {
+        isConnected: () => true,
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "browse_files",
+          arguments: {},
+        },
+      });
+
+      expect((response as any).isError).toBe(true);
+      expect(response.content[0].text).toContain("'target' is required");
+    });
+
+    test("executes successfully with default options", async () => {
+      const client = {
+        isConnected: () => true,
+        browseFiles: jest.fn().mockResolvedValue({
+          target: "worlds/test",
+          dirs: ["worlds/test/avatars"],
+          files: [],
+        }),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "browse_files",
+          arguments: { target: "worlds/test" },
+        },
+      });
+
+      expect(client.browseFiles).toHaveBeenCalledWith({
+        target: "worlds/test",
+        type: undefined,
+        extensions: undefined,
+      });
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("executes successfully with custom options", async () => {
+      const client = {
+        isConnected: () => true,
+        browseFiles: jest.fn().mockResolvedValue({
+          target: "worlds/test",
+          dirs: [],
+          files: ["worlds/test/song.mp3"],
+        }),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "browse_files",
+          arguments: {
+            target: "worlds/test",
+            type: "audio",
+            extensions: [".mp3", ".wav"],
+          },
+        },
+      });
+
+      expect(client.browseFiles).toHaveBeenCalledWith({
+        target: "worlds/test",
+        type: "audio",
+        extensions: [".mp3", ".wav"],
+      });
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("returns error on failure", async () => {
+      const client = {
+        isConnected: () => true,
+        browseFiles: jest.fn().mockRejectedValue(new Error("Directory not found")),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "browse_files",
+          arguments: { target: "worlds/test" },
+        },
+      });
+
+      expect((response as any).isError).toBe(true);
+      expect(response.content[0].text).toContain("Directory not found");
+    });
+  });
 });

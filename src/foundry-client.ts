@@ -1,5 +1,6 @@
 // foundry-client.ts
 import * as fs from "fs";
+import * as http from "http";
 import * as https from "https";
 import * as crypto from "crypto";
 import WebSocket from "ws";
@@ -862,6 +863,346 @@ export class FoundryClient {
   async getWorld(excludeCollections: string[]): Promise<Record<string, unknown>> {
     const worldData = await this.requestWorldData();
     return filterWorldData(worldData, excludeCollections);
+  }
+
+  /**
+   * Upload a file to FoundryVTT
+   * @param options.target - The target directory path (e.g., "worlds/myworld/assets/avatars")
+   * @param options.filename - The filename to use for the uploaded file
+   * @param options.url - URL to download the file from (XOR with image_data)
+   * @param options.image_data - Base64-encoded image data (XOR with url)
+   * @returns The result from Foundry containing the uploaded file path
+   */
+  async uploadFile(options: {
+    target: string;
+    filename: string;
+    url?: string;
+    image_data?: string;
+  }): Promise<{ path: string; message?: string }> {
+    const { target, filename, url, image_data } = options;
+
+    // XOR validation: exactly one of url or image_data must be provided
+    const hasUrl = url !== undefined && url !== null && url !== "";
+    const hasImageData = image_data !== undefined && image_data !== null && image_data !== "";
+
+    if (hasUrl && hasImageData) {
+      throw new Error("Cannot provide both 'url' and 'image_data'. Please provide exactly one.");
+    }
+    if (!hasUrl && !hasImageData) {
+      throw new Error("Must provide either 'url' or 'image_data'. Please provide exactly one.");
+    }
+
+    if (!this.connection) {
+      throw new Error("Not connected to Foundry server");
+    }
+
+    // Get the file data
+    let fileBuffer: Buffer;
+    let contentType: string;
+
+    if (hasUrl) {
+      // Download the file from URL
+      const downloaded = await this.downloadFile(url!);
+      fileBuffer = downloaded.buffer;
+      contentType = downloaded.contentType;
+    } else {
+      // Decode base64 image data
+      fileBuffer = Buffer.from(image_data!, "base64");
+      // Detect content type from filename extension
+      contentType = this.getContentTypeFromFilename(filename);
+    }
+
+    // Create multipart form data
+    const boundary = `----FoundryMCPBoundary${this.crypto.randomBytes(8).toString("hex")}`;
+    const formData = this.buildMultipartFormData(boundary, {
+      source: "data",
+      target,
+      filename,
+      fileBuffer,
+      contentType,
+    });
+
+    return new Promise((resolve, reject) => {
+      const req = this.https.request(
+        {
+          hostname: this.connection!.hostname,
+          port: 443,
+          path: "/upload",
+          method: "POST",
+          headers: {
+            "Content-Type": `multipart/form-data; boundary=${boundary}`,
+            "Content-Length": Buffer.byteLength(formData),
+            Cookie: `session=${this.connection!.sessionId}`,
+          },
+        },
+        (res) => {
+          let data = "";
+          res.on("data", (chunk) => {
+            data += chunk;
+          });
+          res.on("end", () => {
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.error) {
+                reject(new Error(`Upload failed: ${parsed.error}`));
+                return;
+              }
+              resolve({
+                path: parsed.path || `${target}/${filename}`,
+                message: parsed.message,
+              });
+            } catch {
+              if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                resolve({
+                  path: `${target}/${filename}`,
+                  message: "Upload completed",
+                });
+              } else {
+                reject(new Error(`Upload failed with status ${res.statusCode}: ${data}`));
+              }
+            }
+          });
+        }
+      );
+
+      req.on("error", (error) => {
+        reject(new Error(`Upload request failed: ${error.message}`));
+      });
+
+      req.write(formData);
+      req.end();
+    });
+  }
+
+  /**
+   * Download a file from a URL
+   */
+  private downloadFile(url: string): Promise<{ buffer: Buffer; contentType: string }> {
+    return new Promise((resolve, reject) => {
+      const parsedUrl = new URL(url);
+      const isHttps = parsedUrl.protocol === "https:";
+
+      const requestOptions: http.RequestOptions = {
+        hostname: parsedUrl.hostname,
+        port: parsedUrl.port || (isHttps ? 443 : 80),
+        path: parsedUrl.pathname + parsedUrl.search,
+        method: "GET",
+      };
+
+      const handleResponse = (res: http.IncomingMessage) => {
+        // Handle redirects
+        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          this.downloadFile(res.headers.location).then(resolve).catch(reject);
+          return;
+        }
+
+        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(`Failed to download file: HTTP ${res.statusCode}`));
+          return;
+        }
+
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => {
+          chunks.push(chunk);
+        });
+        res.on("end", () => {
+          const buffer = Buffer.concat(chunks);
+          const contentType = (res.headers["content-type"] as string) || "application/octet-stream";
+          resolve({ buffer, contentType });
+        });
+      };
+
+      const req = isHttps
+        ? this.https.request(requestOptions, handleResponse)
+        : http.request(requestOptions, handleResponse);
+
+      req.on("error", (error: Error) => {
+        reject(new Error(`Failed to download file: ${error.message}`));
+      });
+
+      req.end();
+    });
+  }
+
+  /**
+   * Get content type from filename extension
+   */
+  private getContentTypeFromFilename(filename: string): string {
+    const ext = filename.toLowerCase().split(".").pop();
+    const mimeTypes: Record<string, string> = {
+      png: "image/png",
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      gif: "image/gif",
+      webp: "image/webp",
+      svg: "image/svg+xml",
+      bmp: "image/bmp",
+      tiff: "image/tiff",
+      apng: "image/apng",
+      avif: "image/avif",
+      pdf: "application/pdf",
+      mp3: "audio/mpeg",
+      wav: "audio/wav",
+      ogg: "audio/ogg",
+      mp4: "video/mp4",
+      webm: "video/webm",
+    };
+    return mimeTypes[ext || ""] || "application/octet-stream";
+  }
+
+  /**
+   * Build multipart form data for file upload
+   */
+  private buildMultipartFormData(
+    boundary: string,
+    data: {
+      source: string;
+      target: string;
+      filename: string;
+      fileBuffer: Buffer;
+      contentType: string;
+    }
+  ): Buffer {
+    const { source, target, filename, fileBuffer, contentType } = data;
+
+    const parts: Buffer[] = [];
+    const CRLF = "\r\n";
+
+    // source field
+    parts.push(Buffer.from(`--${boundary}${CRLF}`));
+    parts.push(Buffer.from(`Content-Disposition: form-data; name="source"${CRLF}${CRLF}`));
+    parts.push(Buffer.from(`${source}${CRLF}`));
+
+    // target field
+    parts.push(Buffer.from(`--${boundary}${CRLF}`));
+    parts.push(Buffer.from(`Content-Disposition: form-data; name="target"${CRLF}${CRLF}`));
+    parts.push(Buffer.from(`${target}${CRLF}`));
+
+    // upload field (the file)
+    parts.push(Buffer.from(`--${boundary}${CRLF}`));
+    parts.push(Buffer.from(`Content-Disposition: form-data; name="upload"; filename="${filename}"${CRLF}`));
+    parts.push(Buffer.from(`Content-Type: ${contentType}${CRLF}${CRLF}`));
+    parts.push(fileBuffer);
+    parts.push(Buffer.from(CRLF));
+
+    // bucket field
+    parts.push(Buffer.from(`--${boundary}${CRLF}`));
+    parts.push(Buffer.from(`Content-Disposition: form-data; name="bucket"${CRLF}${CRLF}`));
+    parts.push(Buffer.from(`null${CRLF}`));
+
+    // End boundary
+    parts.push(Buffer.from(`--${boundary}--${CRLF}`));
+
+    return Buffer.concat(parts);
+  }
+
+  /**
+   * Browse files in FoundryVTT's file system
+   * @param options.target - The target directory path to browse (e.g., "worlds/myworld/assets")
+   * @param options.type - The file type filter (defaults to "image")
+   * @param options.extensions - Array of file extensions to filter (defaults to common image extensions)
+   * @returns The directory listing including dirs, files, and metadata
+   */
+  async browseFiles(options: {
+    target: string;
+    type?: string;
+    extensions?: string[];
+  }): Promise<{
+    target: string;
+    private: boolean;
+    gridSize: number | null;
+    dirs: string[];
+    privateDirs: string[];
+    files: string[];
+    extensions: string[];
+  }> {
+    const {
+      target,
+      type = "image",
+      extensions = [".apng", ".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".tiff", ".webp"],
+    } = options;
+
+    if (!this.connection || this.connection.ws.readyState !== this.WebSocketCtor.OPEN) {
+      throw new Error("Not connected to Foundry server");
+    }
+
+    const ws = this.connection.ws;
+    const ackId = this.messageCounter++;
+
+    const payload = [
+      "manageFiles",
+      {
+        action: "browseFiles",
+        storage: "data",
+        target,
+      },
+      {
+        type,
+        extensions,
+        wildcard: false,
+        render: true,
+      },
+    ];
+
+    return new Promise((resolve, reject) => {
+      const timeout = this.setTimeoutFn(() => {
+        ws.off("message", messageHandler);
+        reject(new Error("Timeout waiting for browseFiles response (30s)"));
+      }, 30000);
+
+      const messageHandler = (data: WebSocket.Data) => {
+        const message = data.toString();
+
+        // Parse ack message format: 43[payload]
+        const parsed = parseAckMessage(message);
+        if (!parsed.matched) {
+          return;
+        }
+
+        if (parsed.error || !parsed.payload) {
+          return;
+        }
+
+        const responseData = parsed.payload[0] as Record<string, unknown>;
+
+        // Check if this is a file browser response (has dirs array)
+        if (!("dirs" in responseData)) {
+          return;
+        }
+
+        this.clearTimeoutFn(timeout);
+        ws.off("message", messageHandler);
+
+        if (responseData.error) {
+          reject(new Error(`Browse files failed: ${responseData.error}`));
+          return;
+        }
+
+        resolve(responseData as {
+          target: string;
+          private: boolean;
+          gridSize: number | null;
+          dirs: string[];
+          privateDirs: string[];
+          files: string[];
+          extensions: string[];
+        });
+      };
+
+      ws.on("message", messageHandler);
+
+      // Send the manageFiles request
+      const messageStr = `42${ackId}${JSON.stringify(payload)}`;
+      this.logger.error(`[FoundryClient] Sending browseFiles: ${messageStr}`);
+      this.sendWebSocketMessage(ws, messageStr);
+    });
+  }
+
+  /**
+   * Get the session ID for the current connection
+   */
+  getSessionId(): string | null {
+    return this.connection?.sessionId || null;
   }
 
   /**

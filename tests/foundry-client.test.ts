@@ -580,4 +580,384 @@ describe("FoundryClient", () => {
     expect(ws.close).toHaveBeenCalled();
     expect(wsLogger.close).toHaveBeenCalled();
   });
+
+  describe("uploadFile", () => {
+    test("throws when both url and image_data provided", async () => {
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      await expect(client.uploadFile({
+        target: "worlds/test/assets",
+        filename: "test.png",
+        url: "http://example.com/image.png",
+        image_data: "base64data",
+      })).rejects.toThrow("Cannot provide both 'url' and 'image_data'");
+    });
+
+    test("throws when neither url nor image_data provided", async () => {
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      await expect(client.uploadFile({
+        target: "worlds/test/assets",
+        filename: "test.png",
+      })).rejects.toThrow("Must provide either 'url' or 'image_data'");
+    });
+
+    test("throws when not connected", async () => {
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+
+      await expect(client.uploadFile({
+        target: "worlds/test/assets",
+        filename: "test.png",
+        image_data: "aGVsbG8=",
+      })).rejects.toThrow("Not connected to Foundry server");
+    });
+
+    test("uploads base64 image data successfully", async () => {
+      const https = createHttpsStub((_req, callback) => {
+        const res = new EventEmitter() as any;
+        res.statusCode = 200;
+        callback(res);
+        res.emit("data", JSON.stringify({ path: "worlds/test/assets/test.png" }));
+        res.emit("end");
+      });
+
+      const { client } = createClient({
+        WebSocketCtor: TestWebSocket,
+        https,
+        crypto: { randomBytes: jest.fn(() => Buffer.alloc(8, 1)) },
+      });
+
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      const result = await client.uploadFile({
+        target: "worlds/test/assets",
+        filename: "test.png",
+        image_data: "aGVsbG8=", // "hello" in base64
+      });
+
+      expect(result.path).toBe("worlds/test/assets/test.png");
+      expect(https.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          hostname: "host",
+          path: "/upload",
+          method: "POST",
+        }),
+        expect.any(Function)
+      );
+    });
+
+    test("handles upload error response", async () => {
+      const https = createHttpsStub((_req, callback) => {
+        const res = new EventEmitter() as any;
+        res.statusCode = 200;
+        callback(res);
+        res.emit("data", JSON.stringify({ error: "Permission denied" }));
+        res.emit("end");
+      });
+
+      const { client } = createClient({
+        WebSocketCtor: TestWebSocket,
+        https,
+        crypto: { randomBytes: jest.fn(() => Buffer.alloc(8, 1)) },
+      });
+
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      await expect(client.uploadFile({
+        target: "worlds/test/assets",
+        filename: "test.png",
+        image_data: "aGVsbG8=",
+      })).rejects.toThrow("Upload failed: Permission denied");
+    });
+
+    test("handles non-JSON success response", async () => {
+      const https = createHttpsStub((_req, callback) => {
+        const res = new EventEmitter() as any;
+        res.statusCode = 200;
+        callback(res);
+        res.emit("data", "OK");
+        res.emit("end");
+      });
+
+      const { client } = createClient({
+        WebSocketCtor: TestWebSocket,
+        https,
+        crypto: { randomBytes: jest.fn(() => Buffer.alloc(8, 1)) },
+      });
+
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      const result = await client.uploadFile({
+        target: "worlds/test/assets",
+        filename: "test.png",
+        image_data: "aGVsbG8=",
+      });
+
+      expect(result.path).toBe("worlds/test/assets/test.png");
+      expect(result.message).toBe("Upload completed");
+    });
+
+    test("rejects on request error", async () => {
+      const https = {
+        request: jest.fn((_options: any, _callback: any) => {
+          const req = new EventEmitter() as EventEmitter & { write: jest.Mock; end: jest.Mock };
+          req.write = jest.fn();
+          req.end = jest.fn(() => req.emit("error", new Error("Network error")));
+          return req;
+        }),
+      };
+
+      const { client } = createClient({
+        WebSocketCtor: TestWebSocket,
+        https,
+        crypto: { randomBytes: jest.fn(() => Buffer.alloc(8, 1)) },
+      });
+
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      await expect(client.uploadFile({
+        target: "worlds/test/assets",
+        filename: "test.png",
+        image_data: "aGVsbG8=",
+      })).rejects.toThrow("Upload request failed: Network error");
+    });
+  });
+
+  describe("browseFiles", () => {
+    test("throws when not connected", async () => {
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+
+      await expect(client.browseFiles({
+        target: "worlds/test/assets",
+      })).rejects.toThrow("Not connected to Foundry server");
+    });
+
+    test("resolves on browse response", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      const promise = client.browseFiles({ target: "worlds/test/assets" });
+
+      const response = {
+        target: "worlds/test/assets",
+        private: false,
+        gridSize: null,
+        dirs: ["worlds/test/assets/avatars"],
+        privateDirs: [],
+        files: ["worlds/test/assets/image.png"],
+        extensions: [".png", ".jpg"],
+      };
+
+      ws.emit("message", "43" + JSON.stringify([response]));
+
+      await expect(promise).resolves.toEqual(response);
+      expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('["manageFiles"'));
+      jest.useRealTimers();
+    });
+
+    test("uses default extensions for images", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      client.browseFiles({ target: "worlds/test/assets" });
+
+      expect(ws.send).toHaveBeenCalledWith(
+        expect.stringContaining('".apng"')
+      );
+      jest.useRealTimers();
+    });
+
+    test("uses custom type and extensions", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      client.browseFiles({
+        target: "worlds/test/assets",
+        type: "audio",
+        extensions: [".mp3", ".wav"],
+      });
+
+      const sentMessage = ws.send.mock.calls[0][0];
+      expect(sentMessage).toContain('"type":"audio"');
+      expect(sentMessage).toContain('".mp3"');
+      expect(sentMessage).toContain('".wav"');
+      jest.useRealTimers();
+    });
+
+    test("rejects on error response", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      const promise = client.browseFiles({ target: "worlds/test/assets" });
+
+      ws.emit("message", "43" + JSON.stringify([{
+        dirs: [],
+        error: "Directory not found",
+      }]));
+
+      await expect(promise).rejects.toThrow("Browse files failed: Directory not found");
+      jest.useRealTimers();
+    });
+
+    test("times out after 30 seconds", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      const promise = client.browseFiles({ target: "worlds/test/assets" });
+
+      jest.advanceTimersByTime(30000);
+
+      await expect(promise).rejects.toThrow("Timeout waiting for browseFiles response");
+      jest.useRealTimers();
+    });
+
+    test("ignores unrelated messages", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      const promise = client.browseFiles({ target: "worlds/test/assets" });
+
+      // Send unrelated message (no dirs)
+      ws.emit("message", "43" + JSON.stringify([{ type: "Actor", result: [] }]));
+
+      // Then send the actual response
+      const response = {
+        target: "worlds/test/assets",
+        private: false,
+        gridSize: null,
+        dirs: [],
+        privateDirs: [],
+        files: [],
+        extensions: [],
+      };
+      ws.emit("message", "43" + JSON.stringify([response]));
+
+      await expect(promise).resolves.toEqual(response);
+      jest.useRealTimers();
+    });
+  });
+
+  describe("getContentTypeFromFilename", () => {
+    test("returns correct mime types", () => {
+      const { client } = createClient();
+      const getContentType = (client as any).getContentTypeFromFilename.bind(client);
+
+      expect(getContentType("image.png")).toBe("image/png");
+      expect(getContentType("photo.jpg")).toBe("image/jpeg");
+      expect(getContentType("photo.jpeg")).toBe("image/jpeg");
+      expect(getContentType("animation.gif")).toBe("image/gif");
+      expect(getContentType("icon.svg")).toBe("image/svg+xml");
+      expect(getContentType("doc.pdf")).toBe("application/pdf");
+      expect(getContentType("song.mp3")).toBe("audio/mpeg");
+      expect(getContentType("unknown.xyz")).toBe("application/octet-stream");
+    });
+  });
+
+  describe("buildMultipartFormData", () => {
+    test("builds correct multipart structure", () => {
+      const { client } = createClient();
+      const buildFormData = (client as any).buildMultipartFormData.bind(client);
+
+      const result = buildFormData("----TestBoundary", {
+        source: "data",
+        target: "worlds/test",
+        filename: "test.png",
+        fileBuffer: Buffer.from("test"),
+        contentType: "image/png",
+      });
+
+      const str = result.toString();
+      expect(str).toContain("------TestBoundary");
+      expect(str).toContain('name="source"');
+      expect(str).toContain("data");
+      expect(str).toContain('name="target"');
+      expect(str).toContain("worlds/test");
+      expect(str).toContain('name="upload"');
+      expect(str).toContain('filename="test.png"');
+      expect(str).toContain("Content-Type: image/png");
+      expect(str).toContain('name="bucket"');
+      expect(str).toContain("null");
+      expect(str).toContain("------TestBoundary--");
+    });
+  });
 });

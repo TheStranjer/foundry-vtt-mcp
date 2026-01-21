@@ -80,6 +80,82 @@ Same names without `s` suffix: `get_actor`, `get_item`, `get_scene`, etc.
 | `choose_foundry_instance` | Switch active instance by `_id` or `item_order` |
 | `get_world` | Get world metadata (title, system, version) |
 
+### File Management
+
+| Tool | Purpose |
+|------|---------|
+| `upload_file` | Upload a file to FoundryVTT (from URL or base64 data) |
+| `browse_files` | Browse files and directories in FoundryVTT's file system |
+
+#### `upload_file`
+
+Upload files to FoundryVTT. Exactly one of `url` or `image_data` must be provided (XOR logic).
+
+**Parameters:**
+- `target` (required): Directory path (e.g., `"worlds/myworld/assets/avatars"`)
+- `filename` (required): Filename including extension (e.g., `"goblin.png"`)
+- `url`: URL to download file from (cannot use with `image_data`)
+- `image_data`: Base64-encoded file content (cannot use with `url`)
+
+**Example - Upload from URL:**
+```json
+{
+  "tool": "upload_file",
+  "target": "worlds/myworld/assets/avatars",
+  "filename": "hero-portrait.png",
+  "url": "https://example.com/image.png"
+}
+```
+
+**Example - Upload base64 data:**
+```json
+{
+  "tool": "upload_file",
+  "target": "worlds/myworld/assets/tokens",
+  "filename": "custom-token.png",
+  "image_data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+}
+```
+
+#### `browse_files`
+
+Browse the FoundryVTT file system to discover directories and files.
+
+**Parameters:**
+- `target` (required): Directory path to browse (e.g., `"worlds/myworld/assets"`)
+- `type`: File type filter (default: `"image"`)
+- `extensions`: Array of extensions to filter (default: image extensions)
+
+**Example - Browse with defaults:**
+```json
+{
+  "tool": "browse_files",
+  "target": "worlds/myworld/assets"
+}
+```
+
+**Response:**
+```json
+{
+  "target": "worlds/myworld/assets",
+  "private": false,
+  "gridSize": null,
+  "dirs": ["worlds/myworld/assets/avatars", "worlds/myworld/assets/scenes"],
+  "privateDirs": [],
+  "files": ["worlds/myworld/assets/logo.png"],
+  "extensions": [".apng", ".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".tiff", ".webp"]
+}
+```
+
+**Example - Browse for audio files:**
+```json
+{
+  "tool": "browse_files",
+  "target": "worlds/myworld/sounds",
+  "type": "audio",
+  "extensions": [".mp3", ".wav", ".ogg"]
+}
+
 ## FoundryVTT Document Types
 
 ### Primary Documents (World-Level)
