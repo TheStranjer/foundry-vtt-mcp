@@ -843,7 +843,7 @@ describe("FoundryClient", () => {
       jest.useRealTimers();
     });
 
-    test("rejects on error response", async () => {
+    test("rejects on error response with dirs", async () => {
       jest.useFakeTimers();
       const { client } = createClient({ WebSocketCtor: TestWebSocket });
       const ws = new TestWebSocket("ws://host");
@@ -862,6 +862,28 @@ describe("FoundryClient", () => {
       }]));
 
       await expect(promise).rejects.toThrow("Browse files failed: Directory not found");
+      jest.useRealTimers();
+    });
+
+    test("rejects on error response without dirs (non-existent directory)", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      const promise = client.browseFiles({ target: "worlds/werewolf-the-forsaken" });
+
+      // Foundry returns error-only response when directory doesn't exist
+      ws.emit("message", "431" + JSON.stringify([{
+        error: "Directory worlds/werewolf-the-forsaken does not exist or is not accessible in this storage location",
+      }]));
+
+      await expect(promise).rejects.toThrow("Browse files failed: Directory worlds/werewolf-the-forsaken does not exist");
       jest.useRealTimers();
     });
 

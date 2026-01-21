@@ -1165,6 +1165,14 @@ export class FoundryClient {
 
         const responseData = parsed.payload[0] as Record<string, unknown>;
 
+        // Check for error response first (may not have dirs property)
+        if (responseData.error && !("dirs" in responseData)) {
+          this.clearTimeoutFn(timeout);
+          ws.off("message", messageHandler);
+          reject(new Error(`Browse files failed: ${responseData.error}`));
+          return;
+        }
+
         // Check if this is a file browser response (has dirs array)
         if (!("dirs" in responseData)) {
           return;
