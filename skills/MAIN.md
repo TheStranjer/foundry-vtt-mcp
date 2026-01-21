@@ -409,6 +409,125 @@ Text uses a rectangle shape with `text` field:
 }]
 ```
 
+## Setting Images on Documents
+
+Setting an image (avatar, background, texture, etc.) is typically a **two-step process**:
+1. **Upload the image** using `upload_file` to get it into FoundryVTT's file system
+2. **Assign the image** to the document using `modify_document`
+
+**Important**: Before uploading, use `browse_files` to discover the directory structure and find (or identify where to create) the appropriate folder.
+
+### Actor Images
+
+Actors use the `img` field for their portrait/avatar:
+
+```json
+["modifyDocument", {
+  "type": "Actor",
+  "action": "update",
+  "operation": {
+    "parent": null,
+    "pack": null,
+    "updates": [{
+      "img": "worlds/myworld/assets/avatars/character-portrait.jpg",
+      "_id": "ACTOR_ID"
+    }],
+    "action": "update",
+    "diff": true,
+    "render": true
+  }
+}]
+```
+
+### Scene Images
+
+Scenes have three different image properties, each set differently:
+
+| Property | Format | Purpose |
+|----------|--------|---------|
+| `background` | Object with `src` | Main scene background image |
+| `foreground` | String path | Overlay image above tokens |
+| `thumb` | Base64 data URL | Thumbnail preview |
+
+```json
+["modifyDocument", {
+  "type": "Scene",
+  "action": "update",
+  "operation": {
+    "updates": [{
+      "background": {
+        "src": "worlds/myworld/assets/maps/dungeon.jpeg"
+      },
+      "foreground": "worlds/myworld/assets/maps/fog-overlay.png",
+      "thumb": "data:image/webp;base64,UklGR...",
+      "_id": "SCENE_ID"
+    }],
+    "action": "update",
+    "diff": true,
+    "render": true,
+    "thumb": ["SCENE_ID"]
+  }
+}]
+```
+
+**Note**: The `thumb` array in the operation tells Foundry which scenes need thumbnail regeneration.
+
+### Drawing Images (Textures)
+
+Drawings use the `texture` field for image fills. To display the image without color tinting or transparency:
+
+| Field | Required Value | Purpose |
+|-------|---------------|---------|
+| `fillType` | `2` | Pattern/texture fill (0=none, 1=solid, 2=pattern) |
+| `fillColor` | `"#ffffff"` | White prevents color tinting |
+| `fillAlpha` | `1` | Full opacity |
+| `texture` | Path string | Image file path |
+
+```json
+["modifyDocument", {
+  "type": "Drawing",
+  "action": "update",
+  "operation": {
+    "pack": null,
+    "updates": [{
+      "fillType": 2,
+      "fillColor": "#ffffff",
+      "fillAlpha": 1,
+      "texture": "worlds/myworld/assets/textures/stone-floor.png",
+      "_id": "DRAWING_ID"
+    }],
+    "action": "update",
+    "diff": true,
+    "render": true,
+    "parentUuid": "Scene.SCENE_ID"
+  }
+}]
+```
+
+**Warning**: If you omit any of these settings:
+- Without `fillType: 2`: The texture won't display at all
+- Without `fillColor: "#ffffff"`: The image will have a color tint
+- Without `fillAlpha: 1`: The image will be semi-transparent
+
+### Typical Workflow
+
+1. **Browse to find the right directory**:
+   ```json
+   { "tool": "browse_files", "target": "worlds/myworld/assets" }
+   ```
+
+2. **Upload the image**:
+   ```json
+   {
+     "tool": "upload_file",
+     "target": "worlds/myworld/assets/avatars",
+     "filename": "new-character.png",
+     "url": "https://example.com/image.png"
+   }
+   ```
+
+3. **Assign to the document** using the appropriate field for the document type.
+
 ## Best Practices
 
 1. **Inspect before modify**: Use `get_*` tools to understand document structure before changes
