@@ -13,6 +13,28 @@ describe("server tools", () => {
     expect(actorGet).toBeTruthy();
   });
 
+  test("createToolDefinitions includes compendium tools", () => {
+    const tools = createToolDefinitions();
+    const createCompendium = tools.find((tool) => tool.name === "create_compendium");
+    const deleteCompendium = tools.find((tool) => tool.name === "delete_compendium");
+    expect(createCompendium).toBeTruthy();
+    expect(deleteCompendium).toBeTruthy();
+    expect(createCompendium?.inputSchema.required).toContain("label");
+    expect(createCompendium?.inputSchema.required).toContain("type");
+    expect(deleteCompendium?.inputSchema.required).toContain("name");
+  });
+
+  test("document tools include pack parameter", () => {
+    const tools = createToolDefinitions();
+    const modifyDocument = tools.find((tool) => tool.name === "modify_document");
+    const createDocument = tools.find((tool) => tool.name === "create_document");
+    const deleteDocument = tools.find((tool) => tool.name === "delete_document");
+
+    expect(modifyDocument?.inputSchema.properties).toHaveProperty("pack");
+    expect(createDocument?.inputSchema.properties).toHaveProperty("pack");
+    expect(deleteDocument?.inputSchema.properties).toHaveProperty("pack");
+  });
+
   test("handler blocks when not connected", async () => {
     const client = {
       isConnected: () => false,
@@ -130,8 +152,52 @@ describe("server tools", () => {
       },
     });
 
-    expect(client.modifyDocument).toHaveBeenCalledWith("Actor", "1", [{ name: "x" }], { parentUuid: "Scene.1" });
+    expect(client.modifyDocument).toHaveBeenCalledWith("Actor", "1", [{ name: "x" }], { parentUuid: "Scene.1", pack: undefined });
     expect((response as any).isError).toBeUndefined();
+  });
+
+  test("modify_document executes with pack", async () => {
+    const client = {
+      isConnected: () => true,
+      modifyDocument: jest.fn().mockResolvedValue({ ok: true }),
+    } as any;
+
+    const handler = createToolHandler(client);
+    const response = await handler({
+      params: {
+        name: "modify_document",
+        arguments: {
+          type: "Actor",
+          _id: "1",
+          updates: [{ name: "x" }],
+          pack: "world.my-compendium",
+        },
+      },
+    });
+
+    expect(client.modifyDocument).toHaveBeenCalledWith("Actor", "1", [{ name: "x" }], {
+      parentUuid: undefined,
+      pack: "world.my-compendium",
+    });
+    expect((response as any).isError).toBeUndefined();
+  });
+
+  test("modify_document returns error on failure", async () => {
+    const client = {
+      isConnected: () => true,
+      modifyDocument: jest.fn().mockRejectedValue(new Error("Modify failed")),
+    } as any;
+
+    const handler = createToolHandler(client);
+    const response = await handler({
+      params: {
+        name: "modify_document",
+        arguments: { type: "Actor", _id: "1", updates: [{ name: "x" }] },
+      },
+    });
+
+    expect((response as any).isError).toBe(true);
+    expect(response.content[0].text).toContain("Modify failed");
   });
 
   test("create_document validates inputs", async () => {
@@ -145,6 +211,70 @@ describe("server tools", () => {
     expect((response as any).isError).toBe(true);
   });
 
+  test("create_document executes", async () => {
+    const client = {
+      isConnected: () => true,
+      createDocument: jest.fn().mockResolvedValue({ ok: true }),
+    } as any;
+
+    const handler = createToolHandler(client);
+    const response = await handler({
+      params: {
+        name: "create_document",
+        arguments: { type: "Actor", data: [{ name: "x" }], parent_uuid: "Scene.1" },
+      },
+    });
+
+    expect(client.createDocument).toHaveBeenCalledWith("Actor", [{ name: "x" }], {
+      parentUuid: "Scene.1",
+      pack: undefined,
+    });
+    expect((response as any).isError).toBeUndefined();
+  });
+
+  test("create_document executes with pack", async () => {
+    const client = {
+      isConnected: () => true,
+      createDocument: jest.fn().mockResolvedValue({ ok: true }),
+    } as any;
+
+    const handler = createToolHandler(client);
+    const response = await handler({
+      params: {
+        name: "create_document",
+        arguments: {
+          type: "Actor",
+          data: [{ name: "Goblin" }],
+          pack: "world.monsters",
+        },
+      },
+    });
+
+    expect(client.createDocument).toHaveBeenCalledWith("Actor", [{ name: "Goblin" }], {
+      parentUuid: undefined,
+      pack: "world.monsters",
+    });
+    expect((response as any).isError).toBeUndefined();
+  });
+
+  test("create_document returns error on failure", async () => {
+    const client = {
+      isConnected: () => true,
+      createDocument: jest.fn().mockRejectedValue(new Error("Create failed")),
+    } as any;
+
+    const handler = createToolHandler(client);
+    const response = await handler({
+      params: {
+        name: "create_document",
+        arguments: { type: "Actor", data: [{ name: "x" }] },
+      },
+    });
+
+    expect((response as any).isError).toBe(true);
+    expect(response.content[0].text).toContain("Create failed");
+  });
+
   test("delete_document validates inputs", async () => {
     const client = {
       isConnected: () => true,
@@ -154,6 +284,70 @@ describe("server tools", () => {
     const response = await handler({ params: { name: "delete_document", arguments: { type: "Actor", ids: [] } } });
 
     expect((response as any).isError).toBe(true);
+  });
+
+  test("delete_document executes", async () => {
+    const client = {
+      isConnected: () => true,
+      deleteDocument: jest.fn().mockResolvedValue({ ok: true }),
+    } as any;
+
+    const handler = createToolHandler(client);
+    const response = await handler({
+      params: {
+        name: "delete_document",
+        arguments: { type: "Actor", ids: ["1", "2"], parent_uuid: "Scene.1" },
+      },
+    });
+
+    expect(client.deleteDocument).toHaveBeenCalledWith("Actor", ["1", "2"], {
+      parentUuid: "Scene.1",
+      pack: undefined,
+    });
+    expect((response as any).isError).toBeUndefined();
+  });
+
+  test("delete_document executes with pack", async () => {
+    const client = {
+      isConnected: () => true,
+      deleteDocument: jest.fn().mockResolvedValue({ ok: true }),
+    } as any;
+
+    const handler = createToolHandler(client);
+    const response = await handler({
+      params: {
+        name: "delete_document",
+        arguments: {
+          type: "Actor",
+          ids: ["abc123"],
+          pack: "world.monsters",
+        },
+      },
+    });
+
+    expect(client.deleteDocument).toHaveBeenCalledWith("Actor", ["abc123"], {
+      parentUuid: undefined,
+      pack: "world.monsters",
+    });
+    expect((response as any).isError).toBeUndefined();
+  });
+
+  test("delete_document returns error on failure", async () => {
+    const client = {
+      isConnected: () => true,
+      deleteDocument: jest.fn().mockRejectedValue(new Error("Delete failed")),
+    } as any;
+
+    const handler = createToolHandler(client);
+    const response = await handler({
+      params: {
+        name: "delete_document",
+        arguments: { type: "Actor", ids: ["1"] },
+      },
+    });
+
+    expect((response as any).isError).toBe(true);
+    expect(response.content[0].text).toContain("Delete failed");
   });
 
   test("show_credentials returns data", async () => {
@@ -404,6 +598,148 @@ describe("server tools", () => {
 
       expect((response as any).isError).toBe(true);
       expect(response.content[0].text).toContain("Directory not found");
+    });
+  });
+
+  describe("create_compendium", () => {
+    test("requires label", async () => {
+      const client = {
+        isConnected: () => true,
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "create_compendium",
+          arguments: { type: "Actor" },
+        },
+      });
+
+      expect((response as any).isError).toBe(true);
+      expect(response.content[0].text).toContain("'label' is required");
+    });
+
+    test("requires type", async () => {
+      const client = {
+        isConnected: () => true,
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "create_compendium",
+          arguments: { label: "My Compendium" },
+        },
+      });
+
+      expect((response as any).isError).toBe(true);
+      expect(response.content[0].text).toContain("'type' is required");
+    });
+
+    test("executes successfully", async () => {
+      const client = {
+        isConnected: () => true,
+        createCompendium: jest.fn().mockResolvedValue({
+          request: { action: "create" },
+          result: {
+            label: "My NPCs",
+            type: "Actor",
+            name: "my-npcs",
+            id: "world.my-npcs",
+          },
+        }),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "create_compendium",
+          arguments: { label: "My NPCs", type: "Actor" },
+        },
+      });
+
+      expect(client.createCompendium).toHaveBeenCalledWith("My NPCs", "Actor");
+      expect((response as any).isError).toBeUndefined();
+      const result = JSON.parse(response.content[0].text);
+      expect(result.result.name).toBe("my-npcs");
+    });
+
+    test("returns error on failure", async () => {
+      const client = {
+        isConnected: () => true,
+        createCompendium: jest.fn().mockRejectedValue(new Error("Permission denied")),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "create_compendium",
+          arguments: { label: "My NPCs", type: "Actor" },
+        },
+      });
+
+      expect((response as any).isError).toBe(true);
+      expect(response.content[0].text).toContain("Permission denied");
+    });
+  });
+
+  describe("delete_compendium", () => {
+    test("requires name", async () => {
+      const client = {
+        isConnected: () => true,
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "delete_compendium",
+          arguments: {},
+        },
+      });
+
+      expect((response as any).isError).toBe(true);
+      expect(response.content[0].text).toContain("'name' is required");
+    });
+
+    test("executes successfully", async () => {
+      const client = {
+        isConnected: () => true,
+        deleteCompendium: jest.fn().mockResolvedValue({
+          request: { action: "delete", data: "my-npcs" },
+          result: "world.my-npcs",
+        }),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "delete_compendium",
+          arguments: { name: "my-npcs" },
+        },
+      });
+
+      expect(client.deleteCompendium).toHaveBeenCalledWith("my-npcs");
+      expect((response as any).isError).toBeUndefined();
+      const result = JSON.parse(response.content[0].text);
+      expect(result.result).toBe("world.my-npcs");
+    });
+
+    test("returns error on failure", async () => {
+      const client = {
+        isConnected: () => true,
+        deleteCompendium: jest.fn().mockRejectedValue(new Error("Compendium not found")),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "delete_compendium",
+          arguments: { name: "nonexistent" },
+        },
+      });
+
+      expect((response as any).isError).toBe(true);
+      expect(response.content[0].text).toContain("Compendium not found");
     });
   });
 });

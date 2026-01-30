@@ -679,13 +679,15 @@ export class FoundryClient {
    * @param updates - Array of update objects. Each object should contain the _id and the fields to update.
    *                  Updates use dot-notation paths merged into the document, e.g.:
    *                  { "_id": "abc123", "system": { "attributes": { "hp": { "value": 10 } } } }
+   * @param options.parentUuid - Optional UUID of the parent document for embedded documents
+   * @param options.pack - Optional compendium pack ID to modify documents within a compendium
    * @returns The result from Foundry containing the updated document data
    */
   async modifyDocument(
     type: string,
     _id: string,
     updates: Record<string, unknown>[],
-    options?: { parentUuid?: string }
+    options?: { parentUuid?: string; pack?: string }
   ): Promise<Record<string, unknown>> {
     // Ensure each update object has the _id
     const updatesWithId = updates.map((update) => ({
@@ -697,7 +699,7 @@ export class FoundryClient {
     const operation = buildDocumentOperation(
       {
         diff: false,
-        pack: null,
+        pack: options?.pack || null,
         updates: updatesWithId,
         action: "update",
         modifiedTime: this.now(),
@@ -731,17 +733,19 @@ export class FoundryClient {
    *               Each object should contain the fields for the new document.
    *               The exact field structure depends on the game system - consider using get_* tools
    *               first to retrieve an existing document of the same type to understand the schema.
+   * @param options.parentUuid - Optional UUID of the parent document for embedded documents
+   * @param options.pack - Optional compendium pack ID to create documents within a compendium
    * @returns The result from Foundry containing the created document data
    */
   async createDocument(
     type: string,
     data: Record<string, unknown>[],
-    options?: { parentUuid?: string }
+    options?: { parentUuid?: string; pack?: string }
   ): Promise<Record<string, unknown>> {
     // Build operation object with optional parentUuid
     const operation = buildDocumentOperation(
       {
-        pack: null,
+        pack: options?.pack || null,
         data,
         action: "create",
         modifiedTime: this.now(),
@@ -765,17 +769,19 @@ export class FoundryClient {
    * Delete a document in FoundryVTT
    * @param type - The document type (Actor, Item, Scene, JournalEntry, Folder, User, etc.)
    * @param ids - Array of document _ids to delete
+   * @param options.parentUuid - Optional UUID of the parent document for embedded documents
+   * @param options.pack - Optional compendium pack ID to delete documents from a compendium
    * @returns The result from Foundry containing the deleted document IDs
    */
   async deleteDocument(
     type: string,
     ids: string[],
-    options?: { parentUuid?: string }
+    options?: { parentUuid?: string; pack?: string }
   ): Promise<Record<string, unknown>> {
     // Build operation object with optional parentUuid
     const operation = buildDocumentOperation(
       {
-        pack: null,
+        pack: options?.pack || null,
         ids,
         action: "delete",
         modifiedTime: this.now(),
@@ -1211,6 +1217,144 @@ export class FoundryClient {
    */
   getSessionId(): string | null {
     return this.connection?.sessionId || null;
+  }
+
+  /**
+   * Create a new Compendium pack in FoundryVTT
+   * @param label - The display label for the compendium
+   * @param type - The document type this compendium will contain (e.g., "Actor", "Item", "Scene")
+   * @returns The result from Foundry containing the created compendium data
+   */
+  async createCompendium(
+    label: string,
+    type: string
+  ): Promise<Record<string, unknown>> {
+    if (!this.connection || this.connection.ws.readyState !== this.WebSocketCtor.OPEN) {
+      throw new Error("Not connected to Foundry server");
+    }
+
+    const ws = this.connection.ws;
+    const ackId = this.messageCounter++;
+
+    const payload = [
+      "manageCompendium",
+      {
+        action: "create",
+        data: {
+          label,
+          type,
+        },
+        options: {},
+      },
+    ];
+
+    return new Promise((resolve, reject) => {
+      const timeout = this.setTimeoutFn(() => {
+        ws.off("message", messageHandler);
+        reject(new Error("Timeout waiting for createCompendium response (30s)"));
+      }, 30000);
+
+      const messageHandler = (data: WebSocket.Data) => {
+        const message = data.toString();
+
+        const parsed = parseAckMessage(message);
+        if (!parsed.matched) {
+          return;
+        }
+
+        if (parsed.error || !parsed.payload) {
+          return;
+        }
+
+        const responseData = parsed.payload[0] as Record<string, unknown>;
+
+        // Check if this is a compendium management response
+        if (!responseData.request || (responseData.request as Record<string, unknown>).action !== "create") {
+          return;
+        }
+
+        this.clearTimeoutFn(timeout);
+        ws.off("message", messageHandler);
+
+        if (responseData.error) {
+          reject(new Error(`Create compendium failed: ${responseData.error}`));
+          return;
+        }
+
+        resolve(responseData);
+      };
+
+      ws.on("message", messageHandler);
+
+      const messageStr = `42${ackId}${JSON.stringify(payload)}`;
+      this.logger.error(`[FoundryClient] Sending createCompendium: ${messageStr}`);
+      this.sendWebSocketMessage(ws, messageStr);
+    });
+  }
+
+  /**
+   * Delete a Compendium pack from FoundryVTT
+   * @param name - The name (not label) of the compendium to delete (e.g., "my-npcs")
+   * @returns The result from Foundry containing the deleted compendium ID
+   */
+  async deleteCompendium(name: string): Promise<Record<string, unknown>> {
+    if (!this.connection || this.connection.ws.readyState !== this.WebSocketCtor.OPEN) {
+      throw new Error("Not connected to Foundry server");
+    }
+
+    const ws = this.connection.ws;
+    const ackId = this.messageCounter++;
+
+    const payload = [
+      "manageCompendium",
+      {
+        action: "delete",
+        data: name,
+      },
+    ];
+
+    return new Promise((resolve, reject) => {
+      const timeout = this.setTimeoutFn(() => {
+        ws.off("message", messageHandler);
+        reject(new Error("Timeout waiting for deleteCompendium response (30s)"));
+      }, 30000);
+
+      const messageHandler = (data: WebSocket.Data) => {
+        const message = data.toString();
+
+        const parsed = parseAckMessage(message);
+        if (!parsed.matched) {
+          return;
+        }
+
+        if (parsed.error || !parsed.payload) {
+          return;
+        }
+
+        const responseData = parsed.payload[0] as Record<string, unknown>;
+
+        // Check if this is a compendium management response
+        if (!responseData.request || (responseData.request as Record<string, unknown>).action !== "delete") {
+          return;
+        }
+
+        this.clearTimeoutFn(timeout);
+        ws.off("message", messageHandler);
+
+        if (responseData.error) {
+          reject(new Error(`Delete compendium failed: ${responseData.error}`));
+          return;
+        }
+
+        resolve(responseData);
+      };
+
+      ws.on("message", messageHandler);
+
+      const messageStr = `42${ackId}${JSON.stringify(payload)}`;
+      this.logger.error(`[FoundryClient] Sending deleteCompendium: ${messageStr}`);
+      this.sendWebSocketMessage(ws, messageStr);
+    });
   }
 
   /**

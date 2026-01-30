@@ -114,6 +114,10 @@ The exact field structure depends on the game system. Use the get_* tools first 
         type: "string",
         description: `Optional. The UUID of the parent document for embedded documents. Required when modifying embedded documents like Drawings, Tokens, Tiles, Walls, etc. that exist within a parent document (e.g., a Scene). Format: "{ParentType}.{parentId}" (e.g., "Scene.vrKkbtn8u66mv1Y9").`,
       },
+      pack: {
+        type: "string",
+        description: `Optional. The compendium pack ID containing the document to modify (e.g., "world.my-compendium"). If not provided, modifies a world document. Use this to update documents within a compendium.`,
+      },
     },
     required: ["type", "_id", "updates"],
   },
@@ -148,6 +152,10 @@ The exact field structure depends on the game system. Use the get_* tools first 
       parent_uuid: {
         type: "string",
         description: `Optional. The UUID of the parent document for embedded documents. Required when creating embedded documents like Drawings, Tokens, Tiles, Walls, etc. within a parent document (e.g., a Scene). Format: "{ParentType}.{parentId}" (e.g., "Scene.vrKkbtn8u66mv1Y9").`,
+      },
+      pack: {
+        type: "string",
+        description: `Optional. The compendium pack ID to create the document in (e.g., "world.my-compendium"). If not provided, the document is created in the world. Use this to add documents directly to a compendium.`,
       },
     },
     required: ["type", "data"],
@@ -190,6 +198,10 @@ Example: To delete multiple documents:
       parent_uuid: {
         type: "string",
         description: `Optional. The UUID of the parent document for embedded documents. Required when deleting embedded documents like Drawings, Tokens, Tiles, Walls, etc. from a parent document (e.g., a Scene). Format: "{ParentType}.{parentId}" (e.g., "Scene.vrKkbtn8u66mv1Y9").`,
+      },
+      pack: {
+        type: "string",
+        description: `Optional. The compendium pack ID containing the documents to delete (e.g., "world.my-compendium"). If not provided, deletes world documents. Use this to remove documents from a compendium.`,
       },
     },
     required: ["type", "ids"],
@@ -281,6 +293,40 @@ export const browseFilesTool = {
   },
 };
 
+export const createCompendiumTool = {
+  name: "create_compendium",
+  description: `Create a new Compendium pack in FoundryVTT. Compendia are collections of documents (Actors, Items, Scenes, etc.) that can be used for organizing and sharing content. The compendium will be created in the current world.`,
+  inputSchema: {
+    type: "object",
+    properties: {
+      label: {
+        type: "string",
+        description: `The display label for the compendium (e.g., "My NPCs", "Custom Items"). This is what users see in the UI.`,
+      },
+      type: {
+        type: "string",
+        description: `The document type this compendium will contain. Valid types: "Actor", "Item", "Scene", "JournalEntry", "Macro", "Playlist", "RollTable", "Cards", "Adventure". All documents in a compendium must be of the same type.`,
+      },
+    },
+    required: ["label", "type"],
+  },
+};
+
+export const deleteCompendiumTool = {
+  name: "delete_compendium",
+  description: `Delete a Compendium pack from FoundryVTT. This permanently removes the compendium and all documents it contains. Use with caution.`,
+  inputSchema: {
+    type: "object",
+    properties: {
+      name: {
+        type: "string",
+        description: `The name (not label) of the compendium to delete. This is the lowercase, slugified version of the label (e.g., "my-npcs" for a compendium labeled "My NPCs"). You can find this in the compendium's "id" field (e.g., "world.my-npcs" has name "my-npcs").`,
+      },
+    },
+    required: ["name"],
+  },
+};
+
 export function createToolDefinitions() {
   return [
     ...DOCUMENT_TYPES.flatMap((config) => [
@@ -295,6 +341,8 @@ export function createToolDefinitions() {
     chooseFoundryInstanceTool,
     uploadFileTool,
     browseFilesTool,
+    createCompendiumTool,
+    deleteCompendiumTool,
   ];
 }
 
@@ -397,6 +445,7 @@ export function createToolHandler(foundryClient: FoundryClient) {
         const _id = args?._id as string | undefined;
         const updates = args?.updates as Record<string, unknown>[] | undefined;
         const parentUuid = args?.parent_uuid as string | undefined;
+        const pack = args?.pack as string | undefined;
 
         if (!type) {
           return errorResponse("Error: 'type' is required");
@@ -408,7 +457,7 @@ export function createToolHandler(foundryClient: FoundryClient) {
           return errorResponse("Error: 'updates' must be an array of objects");
         }
 
-        const result = await foundryClient.modifyDocument(type, _id, updates, { parentUuid });
+        const result = await foundryClient.modifyDocument(type, _id, updates, { parentUuid, pack });
         return successResponse(result);
       } catch (error) {
         return errorResponse(
@@ -422,6 +471,7 @@ export function createToolHandler(foundryClient: FoundryClient) {
         const type = args?.type as string | undefined;
         const data = args?.data as Record<string, unknown>[] | undefined;
         const parentUuid = args?.parent_uuid as string | undefined;
+        const pack = args?.pack as string | undefined;
 
         if (!type) {
           return errorResponse("Error: 'type' is required");
@@ -430,7 +480,7 @@ export function createToolHandler(foundryClient: FoundryClient) {
           return errorResponse("Error: 'data' must be an array of objects");
         }
 
-        const result = await foundryClient.createDocument(type, data, { parentUuid });
+        const result = await foundryClient.createDocument(type, data, { parentUuid, pack });
         return successResponse(result);
       } catch (error) {
         return errorResponse(
@@ -444,6 +494,7 @@ export function createToolHandler(foundryClient: FoundryClient) {
         const type = args?.type as string | undefined;
         const ids = args?.ids as string[] | undefined;
         const parentUuid = args?.parent_uuid as string | undefined;
+        const pack = args?.pack as string | undefined;
 
         if (!type) {
           return errorResponse("Error: 'type' is required");
@@ -452,7 +503,7 @@ export function createToolHandler(foundryClient: FoundryClient) {
           return errorResponse("Error: 'ids' must be a non-empty array of strings");
         }
 
-        const result = await foundryClient.deleteDocument(type, ids, { parentUuid });
+        const result = await foundryClient.deleteDocument(type, ids, { parentUuid, pack });
         return successResponse(result);
       } catch (error) {
         return errorResponse(
@@ -543,6 +594,44 @@ export function createToolHandler(foundryClient: FoundryClient) {
       } catch (error) {
         return errorResponse(
           `Error browsing files: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "create_compendium") {
+      try {
+        const label = args?.label as string | undefined;
+        const type = args?.type as string | undefined;
+
+        if (!label) {
+          return errorResponse("Error: 'label' is required");
+        }
+        if (!type) {
+          return errorResponse("Error: 'type' is required");
+        }
+
+        const result = await foundryClient.createCompendium(label, type);
+        return successResponse(result);
+      } catch (error) {
+        return errorResponse(
+          `Error creating compendium: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "delete_compendium") {
+      try {
+        const name = args?.name as string | undefined;
+
+        if (!name) {
+          return errorResponse("Error: 'name' is required");
+        }
+
+        const result = await foundryClient.deleteCompendium(name);
+        return successResponse(result);
+      } catch (error) {
+        return errorResponse(
+          `Error deleting compendium: ${error instanceof Error ? error.message : String(error)}`
         );
       }
     }

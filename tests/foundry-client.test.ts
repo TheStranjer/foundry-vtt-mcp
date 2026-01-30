@@ -394,7 +394,25 @@ describe("FoundryClient", () => {
     expect((client as any).sendModifyDocumentRequest).toHaveBeenCalledWith(
       "Actor",
       "update",
-      expect.objectContaining({ parentUuid: "Scene.1", modifiedTime: 123 }),
+      expect.objectContaining({ parentUuid: "Scene.1", modifiedTime: 123, pack: null }),
+      expect.any(String),
+      expect.any(Function),
+      "modifyDocument"
+    );
+  });
+
+  test("modifyDocument builds operation with pack", async () => {
+    const { client } = createClient({ now: () => 123, WebSocketCtor: TestWebSocket });
+    jest.spyOn(client as any, "sendModifyDocumentRequest")
+      .mockResolvedValue({ ok: true });
+
+    const result = await client.modifyDocument("Actor", "1", [{ name: "x" }], { pack: "world.my-compendium" });
+
+    expect(result).toEqual({ ok: true });
+    expect((client as any).sendModifyDocumentRequest).toHaveBeenCalledWith(
+      "Actor",
+      "update",
+      expect.objectContaining({ modifiedTime: 123, pack: "world.my-compendium" }),
       expect.any(String),
       expect.any(Function),
       "modifyDocument"
@@ -411,7 +429,24 @@ describe("FoundryClient", () => {
     expect((client as any).sendModifyDocumentRequest).toHaveBeenCalledWith(
       "Actor",
       "create",
-      expect.objectContaining({ modifiedTime: 456 }),
+      expect.objectContaining({ modifiedTime: 456, pack: null }),
+      expect.any(String),
+      expect.any(Function),
+      "createDocument"
+    );
+  });
+
+  test("createDocument builds operation with pack", async () => {
+    const { client } = createClient({ now: () => 456, WebSocketCtor: TestWebSocket });
+    jest.spyOn(client as any, "sendModifyDocumentRequest")
+      .mockResolvedValue({ ok: true });
+
+    await client.createDocument("Actor", [{ name: "Goblin" }], { pack: "world.monsters" });
+
+    expect((client as any).sendModifyDocumentRequest).toHaveBeenCalledWith(
+      "Actor",
+      "create",
+      expect.objectContaining({ modifiedTime: 456, pack: "world.monsters" }),
       expect.any(String),
       expect.any(Function),
       "createDocument"
@@ -428,7 +463,24 @@ describe("FoundryClient", () => {
     expect((client as any).sendModifyDocumentRequest).toHaveBeenCalledWith(
       "Actor",
       "delete",
-      expect.objectContaining({ modifiedTime: 789 }),
+      expect.objectContaining({ modifiedTime: 789, pack: null }),
+      expect.any(String),
+      expect.any(Function),
+      "deleteDocument"
+    );
+  });
+
+  test("deleteDocument builds operation with pack", async () => {
+    const { client } = createClient({ now: () => 789, WebSocketCtor: TestWebSocket });
+    jest.spyOn(client as any, "sendModifyDocumentRequest")
+      .mockResolvedValue({ ok: true });
+
+    await client.deleteDocument("Actor", ["abc123"], { pack: "world.monsters" });
+
+    expect((client as any).sendModifyDocumentRequest).toHaveBeenCalledWith(
+      "Actor",
+      "delete",
+      expect.objectContaining({ modifiedTime: 789, pack: "world.monsters" }),
       expect.any(String),
       expect.any(Function),
       "deleteDocument"
@@ -931,6 +983,266 @@ describe("FoundryClient", () => {
         privateDirs: [],
         files: [],
         extensions: [],
+      };
+      ws.emit("message", "43" + JSON.stringify([response]));
+
+      await expect(promise).resolves.toEqual(response);
+      jest.useRealTimers();
+    });
+  });
+
+  describe("createCompendium", () => {
+    test("throws when not connected", async () => {
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+
+      await expect(client.createCompendium("My NPCs", "Actor"))
+        .rejects.toThrow("Not connected to Foundry server");
+    });
+
+    test("sends correct payload", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      client.createCompendium("My NPCs", "Actor");
+
+      const sentMessage = ws.send.mock.calls[0][0];
+      expect(sentMessage).toContain('"manageCompendium"');
+      expect(sentMessage).toContain('"action":"create"');
+      expect(sentMessage).toContain('"label":"My NPCs"');
+      expect(sentMessage).toContain('"type":"Actor"');
+      jest.useRealTimers();
+    });
+
+    test("resolves on success response", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      const promise = client.createCompendium("My NPCs", "Actor");
+
+      const response = {
+        request: {
+          action: "create",
+          data: {
+            label: "My NPCs",
+            type: "Actor",
+            name: "my-npcs",
+            id: "world.my-npcs",
+          },
+        },
+        result: {
+          label: "My NPCs",
+          type: "Actor",
+          name: "my-npcs",
+          id: "world.my-npcs",
+        },
+      };
+
+      ws.emit("message", "43" + JSON.stringify([response]));
+
+      await expect(promise).resolves.toEqual(response);
+      jest.useRealTimers();
+    });
+
+    test("rejects on error response", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      const promise = client.createCompendium("My NPCs", "Actor");
+
+      const response = {
+        request: { action: "create" },
+        error: "Permission denied",
+      };
+
+      ws.emit("message", "43" + JSON.stringify([response]));
+
+      await expect(promise).rejects.toThrow("Create compendium failed: Permission denied");
+      jest.useRealTimers();
+    });
+
+    test("times out after 30 seconds", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      const promise = client.createCompendium("My NPCs", "Actor");
+
+      jest.advanceTimersByTime(30000);
+
+      await expect(promise).rejects.toThrow("Timeout waiting for createCompendium response");
+      jest.useRealTimers();
+    });
+
+    test("ignores unrelated messages", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      const promise = client.createCompendium("My NPCs", "Actor");
+
+      // Send unrelated message (wrong action)
+      ws.emit("message", "43" + JSON.stringify([{ request: { action: "delete" }, result: "ok" }]));
+
+      // Send correct response
+      const response = {
+        request: { action: "create" },
+        result: { label: "My NPCs", name: "my-npcs" },
+      };
+      ws.emit("message", "43" + JSON.stringify([response]));
+
+      await expect(promise).resolves.toEqual(response);
+      jest.useRealTimers();
+    });
+  });
+
+  describe("deleteCompendium", () => {
+    test("throws when not connected", async () => {
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+
+      await expect(client.deleteCompendium("my-npcs"))
+        .rejects.toThrow("Not connected to Foundry server");
+    });
+
+    test("sends correct payload", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      client.deleteCompendium("my-npcs");
+
+      const sentMessage = ws.send.mock.calls[0][0];
+      expect(sentMessage).toContain('"manageCompendium"');
+      expect(sentMessage).toContain('"action":"delete"');
+      expect(sentMessage).toContain('"data":"my-npcs"');
+      jest.useRealTimers();
+    });
+
+    test("resolves on success response", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      const promise = client.deleteCompendium("my-npcs");
+
+      const response = {
+        request: { action: "delete", data: "my-npcs" },
+        result: "world.my-npcs",
+      };
+
+      ws.emit("message", "43" + JSON.stringify([response]));
+
+      await expect(promise).resolves.toEqual(response);
+      jest.useRealTimers();
+    });
+
+    test("rejects on error response", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      const promise = client.deleteCompendium("nonexistent");
+
+      const response = {
+        request: { action: "delete" },
+        error: "Compendium not found",
+      };
+
+      ws.emit("message", "43" + JSON.stringify([response]));
+
+      await expect(promise).rejects.toThrow("Delete compendium failed: Compendium not found");
+      jest.useRealTimers();
+    });
+
+    test("times out after 30 seconds", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      const promise = client.deleteCompendium("my-npcs");
+
+      jest.advanceTimersByTime(30000);
+
+      await expect(promise).rejects.toThrow("Timeout waiting for deleteCompendium response");
+      jest.useRealTimers();
+    });
+
+    test("ignores unrelated messages", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+
+      const promise = client.deleteCompendium("my-npcs");
+
+      // Send unrelated message (wrong action)
+      ws.emit("message", "43" + JSON.stringify([{ request: { action: "create" }, result: {} }]));
+
+      // Send correct response
+      const response = {
+        request: { action: "delete" },
+        result: "world.my-npcs",
       };
       ws.emit("message", "43" + JSON.stringify([response]));
 
