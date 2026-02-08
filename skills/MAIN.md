@@ -211,6 +211,7 @@ Browse the FoundryVTT file system to discover directories and files.
   "type": "audio",
   "extensions": [".mp3", ".wav", ".ogg"]
 }
+```
 
 ## FoundryVTT Document Types
 
