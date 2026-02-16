@@ -96,6 +96,7 @@ Same names without `s` suffix: `get_actor`, `get_item`, `get_scene`, etc.
 4. **Preserve existing data**: When updating, only include fields you want to change
 5. **Check `type` field**: Actors and Items have subtypes that affect available fields
 6. **Handle embedded docs carefully**: Some require parent document updates, others have direct tools
+7. **Use nested objects for embedded item updates**: When updating items via an Actor's `items[]` array, always use nested object syntax (`{"system": {"label": "X"}}`) — dot notation (`"system.label": "X"`) is silently ignored
 
 ## Troubleshooting
 
@@ -106,3 +107,4 @@ Same names without `s` suffix: `get_actor`, `get_item`, `get_scene`, etc.
 | Permission denied | Verify MCP user has ownership of document |
 | Large response | Use `max_length` and `requested_fields` |
 | Document not found | Try both `id` and `name` parameters |
+| Embedded item update silently ignored | Use nested object syntax in `items[]`, not dot notation. `{"system": {"value": 3}}` works; `{"system.value": 3}` does not. |
