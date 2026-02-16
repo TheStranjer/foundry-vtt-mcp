@@ -143,7 +143,28 @@ Tokens are embedded in Scenes. Modify the scene to add tokens:
 
 ### Update Embedded Document
 
-For embedded documents, use dot notation or nested objects:
+ ### Update Embedded Document
+ 
+When updating embedded items through a parent document's `items[]` array, **always use nested object syntax** — never dot notation.
+
+Dot notation (`"system.value": 3`) is silently ignored when used inside the `items[]` array of a parent document update. The update will appear to succeed (no error returned) but the field will not change. This applies to all embedded document arrays (`items[]`, `tokens[]`, `lights[]`, etc.) when updated through the parent.
+
++#### Correct — nested objects (batch, any number of items):
+ ```json
+ {
+   "tool": "modify_document",
+   "type": "Actor",
+   "_id": "actorId",
+   "updates": [{
+    "items": [
+      { "_id": "itemId1", "system": { "quantity": 5 } },
+      { "_id": "itemId2", "system": { "label": "Alertness", "value": 3 } }
+    ]
+  }]
+}
+```
+
+#### Wrong — dot notation (silently ignored):
 ```json
 {
   "tool": "modify_document",
@@ -154,6 +175,17 @@ For embedded documents, use dot notation or nested objects:
   }]
 }
 ```
+
+#### Alternative — `parent_uuid` (works with either notation, but one item at a time):
+```json
+{
+  "tool": "modify_document",
+  "type": "Item",
+  "_id": "itemId",
+  "parent_uuid": "Actor.actorId",
+  "updates": [{ "system.quantity": 5 }]
+ }
+ ```
 
 ### Bulk Operations
 
