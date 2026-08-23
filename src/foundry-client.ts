@@ -4,7 +4,6 @@ import * as http from "http";
 import * as https from "https";
 import * as crypto from "crypto";
 import WebSocket from "ws";
-import { WebSocketLogger } from "./websocket-logger.js";
 import { resolveConfigPath } from "./core/config.js";
 import {
   type CredentialInfo,
@@ -64,7 +63,6 @@ export class FoundryClient {
   private messageCounter = 1;
   private credentials: FoundryCredential[] = [];
   private activeCredentialIndex: number = -1;
-  private wsLogger: WebSocketLogger;
   private fs: Pick<typeof fs, "readFileSync">;
   private https: Pick<typeof https, "request">;
   private crypto: Pick<typeof crypto, "randomBytes">;
@@ -81,7 +79,6 @@ export class FoundryClient {
       https?: Pick<typeof https, "request">;
       crypto?: Pick<typeof crypto, "randomBytes">;
       WebSocketCtor?: typeof WebSocket;
-      wsLogger?: WebSocketLogger;
       now?: () => number;
       setTimeoutFn?: typeof setTimeout;
       clearTimeoutFn?: typeof clearTimeout;
@@ -89,7 +86,6 @@ export class FoundryClient {
     } = {}
   ) {
     this.configPath = configPath || resolveConfigPath(process.env, process.cwd());
-    this.wsLogger = deps.wsLogger || new WebSocketLogger();
     this.fs = deps.fs || fs;
     this.https = deps.https || https;
     this.crypto = deps.crypto || crypto;
@@ -220,15 +216,13 @@ export class FoundryClient {
           res.on("end", () => {
             const parsed = parseJoinResponse(res.statusCode, data);
             if (parsed.success) {
-              this.logger.error(
-                `[FoundryClient] Authentication successful: ${parsed.message || ""}`.trim()
-              );
+              this.logger.error(`[FoundryClient] Authentication successful for ${hostname}`);
               resolve(true);
               return;
             }
 
             this.logger.error(
-              `[FoundryClient] Authentication failed for ${hostname}: ${res.statusCode} - ${data}`
+              `[FoundryClient] Authentication failed for ${hostname}: HTTP ${res.statusCode ?? "unknown"}`
             );
             resolve(false);
           });
@@ -263,7 +257,7 @@ export class FoundryClient {
     return new Promise((resolve, reject) => {
       const { url, headers } = selectSocketConnection(generation, hostname, sessionId);
       this.logger.error(
-        `[FoundryClient] Connecting to WebSocket (Foundry gen ${generation ?? "unknown"}): ${url}`
+        `[FoundryClient] Connecting to WebSocket at ${hostname} (Foundry generation ${generation ?? "unknown"})`
       );
 
       const ws = headers
@@ -271,12 +265,12 @@ export class FoundryClient {
         : new this.WebSocketCtor(url);
 
       ws.on("open", () => {
-      this.logger.error("[FoundryClient] WebSocket connection established");
+        this.logger.error("[FoundryClient] WebSocket connection established");
         resolve(ws);
       });
 
-      ws.on("error", (error) => {
-        reject(new Error(`WebSocket connection failed: ${error.message}`));
+      ws.on("error", () => {
+        reject(new Error("WebSocket connection failed"));
       });
 
       // Set a connection timeout
@@ -295,23 +289,20 @@ export class FoundryClient {
    * Set up WebSocket event handlers for reconnection
    */
   private setupWebSocketHandlers(ws: WebSocket): void {
-    ws.on("close", (code, reason) => {
-      this.logger.error(
-        `[FoundryClient] WebSocket closed: ${code} - ${reason.toString()}`
-      );
+    ws.on("close", (code) => {
+      this.logger.error(`[FoundryClient] WebSocket closed: code=${code}`);
       if (!this.reconnecting && this.connection) {
         this.reconnect();
       }
     });
 
-    ws.on("error", (error) => {
-      this.logger.error(`[FoundryClient] WebSocket error: ${error.message}`);
+    ws.on("error", () => {
+      this.logger.error("[FoundryClient] WebSocket error");
     });
 
     ws.on("message", (data) => {
       const message = data.toString();
-      this.wsLogger.logInbound(message);
-      this.logger.error(`[FoundryClient] WebSocket message: ${message}`);
+      this.logWebSocketFrame("inbound", message);
 
       if (isEngineHandshake(message)) {
         this.logger.error("[FoundryClient] Received Engine.IO handshake, sending Socket.IO connect");
@@ -370,9 +361,7 @@ export class FoundryClient {
           return;
         }
 
-        this.logger.error(
-          `[FoundryClient] Game session bound (sessionId=${parsed.sessionId}, userId=${parsed.userId ?? "unknown"})`
-        );
+        this.logger.error("[FoundryClient] Game session bound");
         resolve();
       };
 
@@ -444,7 +433,6 @@ export class FoundryClient {
       try {
         // Step 1: GET /join to get session cookie
         const sessionId = await this.getSession(hostname);
-        this.logger.error(`[FoundryClient] Got session ID: ${sessionId}`);
 
         // Step 2: POST /join to authenticate
         const success = await this.authenticate(hostname, sessionId, credential);
@@ -573,11 +561,29 @@ export class FoundryClient {
     return this.connection?.hostname || null;
   }
 
-  /**
-   * Internal method to send WebSocket messages with logging
-   */
+  private logWebSocketFrame(direction: "inbound" | "outbound", data: string | Buffer): void {
+    const message = Buffer.isBuffer(data) ? data.toString() : data;
+    const type = isEngineHandshake(message)
+      ? "engine-handshake"
+      : isEnginePing(message)
+        ? "engine-ping"
+        : message === ENGINE_PONG
+          ? "engine-pong"
+          : isSessionEvent(message)
+            ? "session"
+            : message.startsWith("43")
+              ? "socket-ack"
+              : message.startsWith("42")
+                ? "socket-event"
+                : "protocol-control";
+
+    this.logger.error(
+      `[FoundryClient] WebSocket ${direction}: type=${type}, bytes=${Buffer.byteLength(message)}`
+    );
+  }
+
   private sendWebSocketMessage(ws: WebSocket, data: string | Buffer): void {
-    this.wsLogger.logOutbound(data);
+    this.logWebSocketFrame("outbound", data);
     ws.send(data);
   }
 
@@ -707,7 +713,7 @@ export class FoundryClient {
 
       // Send the modifyDocument request
       const messageStr = buildModifyDocumentMessage(ackId, payload);
-      this.logger.error(`[FoundryClient] Sending ${logLabel}: ${messageStr}`);
+      this.logger.error(`[FoundryClient] Sending ${logLabel} request`);
       this.sendWebSocketMessage(ws, messageStr);
     });
   }
@@ -1355,7 +1361,7 @@ export class FoundryClient {
 
       // Send the manageFiles request
       const messageStr = `42${ackId}${JSON.stringify(payload)}`;
-      this.logger.error(`[FoundryClient] Sending browseFiles: ${messageStr}`);
+      this.logger.error("[FoundryClient] Sending browseFiles request");
       this.sendWebSocketMessage(ws, messageStr);
     });
   }
@@ -1435,7 +1441,7 @@ export class FoundryClient {
       ws.on("message", messageHandler);
 
       const messageStr = `42${ackId}${JSON.stringify(payload)}`;
-      this.logger.error(`[FoundryClient] Sending createCompendium: ${messageStr}`);
+      this.logger.error("[FoundryClient] Sending createCompendium request");
       this.sendWebSocketMessage(ws, messageStr);
     });
   }
@@ -1500,7 +1506,7 @@ export class FoundryClient {
       ws.on("message", messageHandler);
 
       const messageStr = `42${ackId}${JSON.stringify(payload)}`;
-      this.logger.error(`[FoundryClient] Sending deleteCompendium: ${messageStr}`);
+      this.logger.error("[FoundryClient] Sending deleteCompendium request");
       this.sendWebSocketMessage(ws, messageStr);
     });
   }
@@ -1513,6 +1519,5 @@ export class FoundryClient {
       this.connection.ws.close();
       this.connection = null;
     }
-    this.wsLogger.close();
   }
 }

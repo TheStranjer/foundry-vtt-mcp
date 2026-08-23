@@ -30,14 +30,12 @@ function createHttpsStub(responder: (req: EventEmitter, callback: (res: any) => 
 
 function createClient(overrides: Record<string, unknown> = {}) {
   const logger = { error: jest.fn() };
-  const wsLogger = { logInbound: jest.fn(), logOutbound: jest.fn(), close: jest.fn() } as any;
   const deps = {
     logger,
-    wsLogger,
     ...overrides,
   };
   const client = new FoundryClient("/tmp/creds.json", deps as any);
-  return { client, logger, wsLogger };
+  return { client, logger };
 }
 
 describe("FoundryClient", () => {
@@ -112,7 +110,7 @@ describe("FoundryClient", () => {
       res.emit("end");
       expect((req as any).write).toHaveBeenCalled();
     });
-    const { client } = createClient({ https });
+    const { client, logger } = createClient({ https });
 
     const success = await (client as any).authenticate("host", "sid", {
       _id: "x",
@@ -121,6 +119,10 @@ describe("FoundryClient", () => {
       userid: "user",
     });
     expect(success).toBe(true);
+    expect(logger.error).toHaveBeenCalledWith(
+      "[FoundryClient] Authentication successful for host"
+    );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("ok");
   });
 
   test("authenticate returns false on failure", async () => {
@@ -131,7 +133,7 @@ describe("FoundryClient", () => {
       res.emit("data", "nope");
       res.emit("end");
     });
-    const { client } = createClient({ https });
+    const { client, logger } = createClient({ https });
 
     const success = await (client as any).authenticate("host", "sid", {
       _id: "x",
@@ -140,6 +142,10 @@ describe("FoundryClient", () => {
       userid: "user",
     });
     expect(success).toBe(false);
+    expect(logger.error).toHaveBeenCalledWith(
+      "[FoundryClient] Authentication failed for host: HTTP 401"
+    );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("nope");
   });
 
   test("authenticate rejects on request error", async () => {
@@ -246,13 +252,14 @@ describe("FoundryClient", () => {
       }
     }
 
-    const { client } = createClient({ WebSocketCtor: Ws as any });
+    const { client, logger } = createClient({ WebSocketCtor: Ws as any });
     const promise = (client as any).connectWebSocket("host", "sid", 13);
     created?.emit("open");
 
     await expect(promise).resolves.toBe(created);
     expect(ctorUrl).toBe("wss://host/socket.io/?session=sid&EIO=4&transport=websocket");
     expect(ctorOpts).toBeUndefined();
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("sid");
     jest.useRealTimers();
   });
 
@@ -347,13 +354,18 @@ describe("FoundryClient", () => {
   });
 
   test("setupWebSocketHandlers ignores session event", () => {
-    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const { client, logger } = createClient({ WebSocketCtor: TestWebSocket });
     const ws = new TestWebSocket("ws://host");
     (client as any).setupWebSocketHandlers(ws);
 
-    ws.emit("message", "42[\"session\",{}]");
+    const payload = "42[\"session\",{\"sessionId\":\"secret\"}]";
+    ws.emit("message", payload);
 
     expect(ws.send).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      `[FoundryClient] WebSocket inbound: type=session, bytes=${Buffer.byteLength(payload)}`
+    );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("secret");
   });
 
   test("setupWebSocketHandlers replies to Engine.IO ping with a pong", () => {
@@ -805,8 +817,28 @@ describe("FoundryClient", () => {
     expect(() => client.send("hi")).toThrow("Not connected to Foundry server");
   });
 
-  test("disconnect closes ws and logger", () => {
-    const { client, wsLogger } = createClient({ WebSocketCtor: TestWebSocket });
+  test("send logs WebSocket metadata without the payload", () => {
+    const { client, logger } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+    (client as any).connection = {
+      hostname: "host",
+      credential: { _id: "c", hostname: "host", password: "p", userid: "u" },
+      sessionId: "sid",
+      ws,
+    };
+
+    const payload = '42["modifyDocument",{"password":"secret"}]';
+    client.send(payload);
+
+    expect(ws.send).toHaveBeenCalledWith(payload);
+    expect(logger.error).toHaveBeenCalledWith(
+      `[FoundryClient] WebSocket outbound: type=socket-event, bytes=${Buffer.byteLength(payload)}`
+    );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("secret");
+  });
+
+  test("disconnect closes ws", () => {
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
     const ws = new TestWebSocket("ws://host");
     (client as any).connection = {
       hostname: "host",
@@ -818,7 +850,6 @@ describe("FoundryClient", () => {
     client.disconnect();
 
     expect(ws.close).toHaveBeenCalled();
-    expect(wsLogger.close).toHaveBeenCalled();
   });
 
   describe("uploadFile", () => {

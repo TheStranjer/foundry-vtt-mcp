@@ -67,7 +67,6 @@ describe("server tools", () => {
     const { FoundryClient } = await import("../src/foundry-client.js");
     const client = new FoundryClient("/tmp/creds.json", {
       logger: { error: jest.fn() },
-      wsLogger: { logInbound: jest.fn(), logOutbound: jest.fn(), close: jest.fn() },
     } as any);
 
     jest.spyOn(client, "isConnected").mockReturnValue(true);

@@ -61,6 +61,14 @@ Create a file at `config/foundry_credentials.json`:
 ]
 ```
 
+Restrict the credentials file so that only its owner can read or write it:
+
+```bash
+chmod 600 config/foundry_credentials.json
+```
+
+Do not include this file in backups, diagnostic bundles, or logs.
+
 **Fields:**
 - `_id` - A user-defined identifier for this credential entry (used to switch between instances)
 - `hostname` - The domain/IP of your FoundryVTT server
