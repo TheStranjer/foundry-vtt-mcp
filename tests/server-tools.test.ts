@@ -24,6 +24,13 @@ describe("server tools", () => {
     expect(deleteCompendium?.inputSchema.required).toContain("name");
   });
 
+  test("upload tool accepts base64 data only", () => {
+    const upload = createToolDefinitions().find((tool) => tool.name === "upload_file");
+
+    expect(upload?.inputSchema.properties).not.toHaveProperty("url");
+    expect(upload?.inputSchema.required).toContain("image_data");
+  });
+
   test("document tools include pack parameter", () => {
     const tools = createToolDefinitions();
     const modifyDocument = tools.find((tool) => tool.name === "modify_document");
@@ -488,13 +495,12 @@ describe("server tools", () => {
       expect(client.uploadFile).toHaveBeenCalledWith({
         target: "worlds/test",
         filename: "image.png",
-        url: undefined,
         image_data: "aGVsbG8=",
       });
       expect((response as any).isError).toBeUndefined();
     });
 
-    test("executes successfully with url", async () => {
+    test("rejects URL-only input", async () => {
       const client = {
         isConnected: () => true,
         uploadFile: jest.fn().mockResolvedValue({ path: "worlds/test/image.png" }),
@@ -512,13 +518,9 @@ describe("server tools", () => {
         },
       });
 
-      expect(client.uploadFile).toHaveBeenCalledWith({
-        target: "worlds/test",
-        filename: "image.png",
-        url: "https://example.com/image.png",
-        image_data: undefined,
-      });
-      expect((response as any).isError).toBeUndefined();
+      expect(client.uploadFile).not.toHaveBeenCalled();
+      expect((response as any).isError).toBe(true);
+      expect(response.content[0].text).toContain("'image_data' is required");
     });
 
     test("returns error on failure", async () => {

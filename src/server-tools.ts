@@ -239,12 +239,7 @@ export const chooseFoundryInstanceTool = {
 
 export const uploadFileTool = {
   name: "upload_file",
-  description: `Upload a file to FoundryVTT. You must provide EXACTLY ONE of 'url' or 'image_data' (XOR logic). If you provide both or neither, the request will fail.
-
-- Use 'url' to download and upload a file from a remote URL (e.g., an image URL from the web)
-- Use 'image_data' to upload base64-encoded file content directly
-
-The file will be uploaded to the specified target directory in FoundryVTT's data storage.`,
+  description: `Upload base64-encoded file content to the specified target directory in FoundryVTT's data storage. The content can be an image, audio file, video, PDF, or any other file type accepted by FoundryVTT.`,
   inputSchema: {
     type: "object",
     properties: {
@@ -256,16 +251,12 @@ The file will be uploaded to the specified target directory in FoundryVTT's data
         type: "string",
         description: `The filename to use for the uploaded file (including extension). Example: "goblin-avatar.png"`,
       },
-      url: {
-        type: "string",
-        description: `URL to download the file from. The file will be downloaded and then uploaded to FoundryVTT. Cannot be used together with 'image_data'.`,
-      },
       image_data: {
         type: "string",
-        description: `Base64-encoded file content to upload. Cannot be used together with 'url'.`,
+        description: `Base64-encoded file content to upload.`,
       },
     },
-    required: ["target", "filename"],
+    required: ["target", "filename", "image_data"],
   },
 };
 
@@ -551,7 +542,6 @@ export function createToolHandler(foundryClient: FoundryClient) {
       try {
         const target = args?.target as string | undefined;
         const filename = args?.filename as string | undefined;
-        const url = args?.url as string | undefined;
         const imageData = args?.image_data as string | undefined;
 
         if (!target) {
@@ -560,11 +550,13 @@ export function createToolHandler(foundryClient: FoundryClient) {
         if (!filename) {
           return errorResponse("Error: 'filename' is required");
         }
+        if (!imageData) {
+          return errorResponse("Error: 'image_data' is required");
+        }
 
         const result = await foundryClient.uploadFile({
           target,
           filename,
-          url,
           image_data: imageData,
         });
         return successResponse(result);

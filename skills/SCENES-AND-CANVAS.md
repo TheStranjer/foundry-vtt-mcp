@@ -628,7 +628,7 @@ Drawings use the `texture` field for image fills. To display the image without c
      "tool": "upload_file",
      "target": "worlds/myworld/assets/avatars",
      "filename": "new-character.png",
-     "url": "https://example.com/image.png"
+     "image_data": "iVBORw0KGgo..."
    }
    ```
 

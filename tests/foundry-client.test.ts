@@ -822,38 +822,59 @@ describe("FoundryClient", () => {
   });
 
   describe("uploadFile", () => {
-    test("throws when both url and image_data provided", async () => {
-      const { client } = createClient({ WebSocketCtor: TestWebSocket });
-      const ws = new TestWebSocket("ws://host");
-      (client as any).connection = {
-        hostname: "host",
-        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
-        sessionId: "sid",
-        ws,
-      };
+    test("rejects an empty file", async () => {
+      const https = { request: jest.fn() };
+      const { client } = createClient({ WebSocketCtor: TestWebSocket, https });
 
       await expect(client.uploadFile({
         target: "worlds/test/assets",
-        filename: "test.png",
-        url: "http://example.com/image.png",
-        image_data: "base64data",
-      })).rejects.toThrow("Cannot provide both 'url' and 'image_data'");
+        filename: "test.bin",
+        image_data: "",
+      })).rejects.toThrow("must not be empty");
+      expect(https.request).not.toHaveBeenCalled();
     });
 
-    test("throws when neither url nor image_data provided", async () => {
-      const { client } = createClient({ WebSocketCtor: TestWebSocket });
-      const ws = new TestWebSocket("ws://host");
-      (client as any).connection = {
-        hostname: "host",
-        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
-        sessionId: "sid",
-        ws,
-      };
+    test.each(["not base64", "abc", "====", "AB==", "aGVsbG8=\n"])("rejects invalid base64: %j", async (image_data) => {
+      const https = { request: jest.fn() };
+      const { client } = createClient({ WebSocketCtor: TestWebSocket, https });
 
       await expect(client.uploadFile({
         target: "worlds/test/assets",
-        filename: "test.png",
-      })).rejects.toThrow("Must provide either 'url' or 'image_data'");
+        filename: "test.bin",
+        image_data,
+      })).rejects.toThrow("must be valid base64");
+      expect(https.request).not.toHaveBeenCalled();
+    });
+
+    test.each(["../test.png", "test/name.png", "test\\name.png", "test\".png", "test\n.png"])(
+      "rejects unsafe filename: %j",
+      async (filename) => {
+        const https = { request: jest.fn() };
+        const { client } = createClient({ WebSocketCtor: TestWebSocket, https });
+
+        await expect(client.uploadFile({
+          target: "worlds/test/assets",
+          filename,
+          image_data: "aGVsbG8=",
+        })).rejects.toThrow("Invalid filename");
+        expect(https.request).not.toHaveBeenCalled();
+      }
+    );
+
+    test("rejects an oversized file before the upload request", async () => {
+      const https = { request: jest.fn() };
+      const { client } = createClient({
+        WebSocketCtor: TestWebSocket,
+        https,
+        env: { FOUNDRY_MCP_MAX_UPLOAD_BYTES: "4" },
+      });
+
+      await expect(client.uploadFile({
+        target: "worlds/test/assets",
+        filename: "test.bin",
+        image_data: "aGVsbG8=",
+      })).rejects.toThrow("4-byte upload limit");
+      expect(https.request).not.toHaveBeenCalled();
     });
 
     test("throws when not connected", async () => {
@@ -904,6 +925,8 @@ describe("FoundryClient", () => {
         }),
         expect.any(Function)
       );
+      const formData = (https.request as jest.Mock).mock.results[0].value.write.mock.calls[0][0] as Buffer;
+      expect(formData.toString()).toContain("Content-Type: image/png");
     });
 
     test("handles upload error response", async () => {

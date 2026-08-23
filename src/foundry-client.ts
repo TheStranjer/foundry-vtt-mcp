@@ -1,11 +1,10 @@
 // foundry-client.ts
 import * as fs from "fs";
-import * as http from "http";
 import * as https from "https";
 import * as crypto from "crypto";
 import WebSocket from "ws";
 import { WebSocketLogger } from "./websocket-logger.js";
-import { resolveConfigPath } from "./core/config.js";
+import { resolveConfigPath, resolveMaxUploadBytes } from "./core/config.js";
 import {
   type CredentialInfo,
   type FoundryCredential,
@@ -73,6 +72,7 @@ export class FoundryClient {
   private setTimeoutFn: typeof setTimeout;
   private clearTimeoutFn: typeof clearTimeout;
   private logger: { error: (...args: unknown[]) => void };
+  private maxUploadBytes: number;
 
   constructor(
     configPath?: string,
@@ -86,6 +86,7 @@ export class FoundryClient {
       setTimeoutFn?: typeof setTimeout;
       clearTimeoutFn?: typeof clearTimeout;
       logger?: { error: (...args: unknown[]) => void };
+      env?: NodeJS.ProcessEnv;
     } = {}
   ) {
     this.configPath = configPath || resolveConfigPath(process.env, process.cwd());
@@ -98,6 +99,7 @@ export class FoundryClient {
     this.setTimeoutFn = deps.setTimeoutFn || setTimeout;
     this.clearTimeoutFn = deps.clearTimeoutFn || clearTimeout;
     this.logger = deps.logger || console;
+    this.maxUploadBytes = resolveMaxUploadBytes(deps.env || process.env);
   }
 
   /**
@@ -1023,48 +1025,46 @@ export class FoundryClient {
    * Upload a file to FoundryVTT
    * @param options.target - The target directory path (e.g., "worlds/myworld/assets/avatars")
    * @param options.filename - The filename to use for the uploaded file
-   * @param options.url - URL to download the file from (XOR with image_data)
-   * @param options.image_data - Base64-encoded image data (XOR with url)
+   * @param options.image_data - Base64-encoded file data
    * @returns The result from Foundry containing the uploaded file path
    */
   async uploadFile(options: {
     target: string;
     filename: string;
-    url?: string;
-    image_data?: string;
+    image_data: string;
   }): Promise<{ path: string; message?: string }> {
-    const { target, filename, url, image_data } = options;
+    const { target, filename, image_data } = options;
 
-    // XOR validation: exactly one of url or image_data must be provided
-    const hasUrl = url !== undefined && url !== null && url !== "";
-    const hasImageData = image_data !== undefined && image_data !== null && image_data !== "";
-
-    if (hasUrl && hasImageData) {
-      throw new Error("Cannot provide both 'url' and 'image_data'. Please provide exactly one.");
+    if (typeof filename !== "string") throw new Error("Invalid filename");
+    const hasControlCharacter = [...filename].some((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127;
+    });
+    if (!filename || filename === "." || filename === ".." || /[\\/"']/.test(filename) || hasControlCharacter) {
+      throw new Error("Invalid filename: use a plain filename without path separators, quotes, or control characters");
     }
-    if (!hasUrl && !hasImageData) {
-      throw new Error("Must provide either 'url' or 'image_data'. Please provide exactly one.");
+    if (typeof image_data !== "string" || !image_data) {
+      throw new Error("'image_data' is required and must not be empty");
+    }
+    if (image_data.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(image_data)) {
+      throw new Error("'image_data' must be valid base64");
+    }
+
+    const padding = image_data.endsWith("==") ? 2 : image_data.endsWith("=") ? 1 : 0;
+    const decodedBytes = image_data.length / 4 * 3 - padding;
+    if (decodedBytes > this.maxUploadBytes) {
+      throw new Error(`File exceeds the ${this.maxUploadBytes}-byte upload limit`);
+    }
+    const fileBuffer = Buffer.from(image_data, "base64");
+    if (fileBuffer.toString("base64") !== image_data) {
+      throw new Error("'image_data' must be valid base64");
     }
 
     if (!this.connection) {
       throw new Error("Not connected to Foundry server");
     }
 
-    // Get the file data
-    let fileBuffer: Buffer;
-    let contentType: string;
-
-    if (hasUrl) {
-      // Download the file from URL
-      const downloaded = await this.downloadFile(url!);
-      fileBuffer = downloaded.buffer;
-      contentType = downloaded.contentType;
-    } else {
-      // Decode base64 image data
-      fileBuffer = Buffer.from(image_data!, "base64");
-      // Detect content type from filename extension
-      contentType = this.getContentTypeFromFilename(filename);
-    }
+    const contentType = this.getContentTypeFromFilename(filename);
 
     // Create multipart form data
     const boundary = `----FoundryMCPBoundary${this.crypto.randomBytes(8).toString("hex")}`;
@@ -1124,56 +1124,6 @@ export class FoundryClient {
       });
 
       req.write(formData);
-      req.end();
-    });
-  }
-
-  /**
-   * Download a file from a URL
-   */
-  private downloadFile(url: string): Promise<{ buffer: Buffer; contentType: string }> {
-    return new Promise((resolve, reject) => {
-      const parsedUrl = new URL(url);
-      const isHttps = parsedUrl.protocol === "https:";
-
-      const requestOptions: http.RequestOptions = {
-        hostname: parsedUrl.hostname,
-        port: parsedUrl.port || (isHttps ? 443 : 80),
-        path: parsedUrl.pathname + parsedUrl.search,
-        method: "GET",
-      };
-
-      const handleResponse = (res: http.IncomingMessage) => {
-        // Handle redirects
-        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          this.downloadFile(res.headers.location).then(resolve).catch(reject);
-          return;
-        }
-
-        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-          reject(new Error(`Failed to download file: HTTP ${res.statusCode}`));
-          return;
-        }
-
-        const chunks: Buffer[] = [];
-        res.on("data", (chunk: Buffer) => {
-          chunks.push(chunk);
-        });
-        res.on("end", () => {
-          const buffer = Buffer.concat(chunks);
-          const contentType = (res.headers["content-type"] as string) || "application/octet-stream";
-          resolve({ buffer, contentType });
-        });
-      };
-
-      const req = isHttps
-        ? this.https.request(requestOptions, handleResponse)
-        : http.request(requestOptions, handleResponse);
-
-      req.on("error", (error: Error) => {
-        reject(new Error(`Failed to download file: ${error.message}`));
-      });
-
       req.end();
     });
   }

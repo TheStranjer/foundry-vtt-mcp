@@ -69,12 +69,18 @@ Create a file at `config/foundry_credentials.json`:
 
 You can configure multiple Foundry instances and switch between them at runtime using the `choose_foundry_instance` tool.
 
-### Environment Variable
+### Environment Variables
 
 Override the default credentials path by setting:
 
 ```bash
 export FOUNDRY_CREDENTIALS=/path/to/credentials.json
+```
+
+File uploads accept base64 data only. The default maximum decoded file size is 25 MiB. Set a byte limit from 1 through 104857600 if needed:
+
+```bash
+export FOUNDRY_MCP_MAX_UPLOAD_BYTES=26214400
 ```
 
 ## Usage with MCP Clients
@@ -216,6 +222,19 @@ Permanently delete documents from FoundryVTT. **This cannot be undone.**
   "ids": ["vlcf6AI5FaE9qjgJ", "abc123def456"]
 }
 ```
+
+### File Management
+
+#### `upload_file`
+
+Upload a base64-encoded file to FoundryVTT. Images, audio, video, PDFs, and other file types supported by FoundryVTT are accepted.
+
+**Parameters:**
+- `target` (string, required): Destination directory in FoundryVTT data storage
+- `filename` (string, required): Plain filename with an extension
+- `image_data` (string, required): Base64-encoded file content
+
+The server does not download URLs. Fetch remote files in the MCP client, then pass their base64 content.
 
 ### Instance Management
 

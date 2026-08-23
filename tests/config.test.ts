@@ -1,4 +1,4 @@
-import { resolveConfigPath } from "../src/core/config.js";
+import { resolveConfigPath, resolveMaxUploadBytes } from "../src/core/config.js";
 import * as path from "path";
 
 describe("resolveConfigPath", () => {
@@ -11,5 +11,20 @@ describe("resolveConfigPath", () => {
     const env = {} as NodeJS.ProcessEnv;
     expect(resolveConfigPath(env, "/cwd"))
       .toBe(path.join("/cwd", "config", "foundry_credentials.json"));
+  });
+});
+
+describe("resolveMaxUploadBytes", () => {
+  test("defaults to 25 MiB", () => {
+    expect(resolveMaxUploadBytes({})).toBe(25 * 1024 * 1024);
+  });
+
+  test.each(["0", "104857601", "1.5", "nope"])("rejects invalid value %s", (value) => {
+    expect(() => resolveMaxUploadBytes({ FOUNDRY_MCP_MAX_UPLOAD_BYTES: value }))
+      .toThrow("FOUNDRY_MCP_MAX_UPLOAD_BYTES must be an integer between 1 and 104857600");
+  });
+
+  test("accepts the configured byte limit", () => {
+    expect(resolveMaxUploadBytes({ FOUNDRY_MCP_MAX_UPLOAD_BYTES: "42" })).toBe(42);
   });
 });

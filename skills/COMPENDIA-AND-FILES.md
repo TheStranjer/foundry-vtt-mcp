@@ -67,30 +67,19 @@ Delete a Compendium pack. **This permanently removes all documents in the compen
 
 | Tool | Purpose |
 |------|---------|
-| `upload_file` | Upload a file to FoundryVTT (from URL or base64 data) |
+| `upload_file` | Upload base64-encoded file content to FoundryVTT |
 | `browse_files` | Browse files and directories in FoundryVTT's file system |
 
 ### `upload_file`
 
-Upload files to FoundryVTT. Exactly one of `url` or `image_data` must be provided (XOR logic).
+Upload base64-encoded files to FoundryVTT. This supports images, audio, video, PDFs, and other file types accepted by FoundryVTT. Remote URLs are not fetched by the server.
 
 **Parameters:**
 - `target` (required): Directory path (e.g., `"worlds/myworld/assets/avatars"`)
 - `filename` (required): Filename including extension (e.g., `"goblin.png"`)
-- `url`: URL to download file from (cannot use with `image_data`)
-- `image_data`: Base64-encoded file content (cannot use with `url`)
+- `image_data` (required): Base64-encoded file content
 
-**Example - Upload from URL:**
-```json
-{
-  "tool": "upload_file",
-  "target": "worlds/myworld/assets/avatars",
-  "filename": "hero-portrait.png",
-  "url": "https://example.com/image.png"
-}
-```
-
-**Example - Upload base64 data:**
+**Example:**
 ```json
 {
   "tool": "upload_file",
