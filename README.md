@@ -77,6 +77,19 @@ Override the default credentials path by setting:
 export FOUNDRY_CREDENTIALS=/path/to/credentials.json
 ```
 
+### Deletion
+
+Permanent deletion tools are disabled by default. Set the following variable
+only when you need to delete documents or compendium packs:
+
+```bash
+export FOUNDRY_MCP_ALLOW_DELETES=true
+```
+
+Only the exact value `true` enables `delete_document` and
+`delete_compendium`. Creating and modifying content remains enabled by
+default.
+
 ## Usage with MCP Clients
 
 Add to your MCP client configuration:

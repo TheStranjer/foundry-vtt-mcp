@@ -327,8 +327,40 @@ export const deleteCompendiumTool = {
   },
 };
 
-export function createToolDefinitions() {
-  return [
+export interface ToolSecurityOptions {
+  allowDeletes?: boolean;
+}
+
+const DELETE_TOOL_NAMES = new Set(["delete_document", "delete_compendium"]);
+const READ_ONLY_TOOL_NAMES = new Set([
+  ...DOCUMENT_TYPES.flatMap((config) => [
+    `get_${config.plural}`,
+    `get_${config.singular}`,
+  ]),
+  "get_world",
+  "show_credentials",
+  "browse_files",
+]);
+const DESTRUCTIVE_TOOL_NAMES = new Set([
+  "modify_document",
+  "upload_file",
+  ...DELETE_TOOL_NAMES,
+]);
+
+function addToolAnnotations<T extends { name: string }>(tool: T) {
+  return {
+    ...tool,
+    annotations: {
+      readOnlyHint: READ_ONLY_TOOL_NAMES.has(tool.name),
+      destructiveHint: DESTRUCTIVE_TOOL_NAMES.has(tool.name),
+    },
+  };
+}
+
+export function createToolDefinitions(
+  options: ToolSecurityOptions = {}
+) {
+  const tools = [
     ...DOCUMENT_TYPES.flatMap((config) => [
       generateListToolDefinition(config),
       generateGetToolDefinition(config),
@@ -344,6 +376,10 @@ export function createToolDefinitions() {
     createCompendiumTool,
     deleteCompendiumTool,
   ];
+
+  return tools
+    .filter((tool) => options.allowDeletes || !DELETE_TOOL_NAMES.has(tool.name))
+    .map(addToolAnnotations);
 }
 
 export function errorResponse(message: string) {
@@ -359,9 +395,18 @@ export function successResponse(data: unknown) {
   };
 }
 
-export function createToolHandler(foundryClient: FoundryClient) {
+export function createToolHandler(
+  foundryClient: FoundryClient,
+  options: ToolSecurityOptions = {}
+) {
   return async (request: { params: { name: string; arguments?: Record<string, unknown> } }) => {
     const { name, arguments: args } = request.params;
+
+    if (!options.allowDeletes && DELETE_TOOL_NAMES.has(name)) {
+      return errorResponse(
+        "Error: Deletion is disabled. Set FOUNDRY_MCP_ALLOW_DELETES=true to enable it."
+      );
+    }
 
     const connectionlessTools = ["show_credentials", "choose_foundry_instance"];
 

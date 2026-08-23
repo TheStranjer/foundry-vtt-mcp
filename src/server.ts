@@ -10,6 +10,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { FoundryClient } from "./foundry-client.js";
 import { createToolDefinitions, createToolHandler } from "./server-tools.js";
+import { resolveAllowDeletes } from "./core/config.js";
 
 // Get the directory of this file to locate INSTRUCTIONS.md
 const __filename = fileURLToPath(import.meta.url);
@@ -33,6 +34,7 @@ const foundryClient = new FoundryClient();
 
 // Load instructions for MCP clients
 const instructions = loadInstructions();
+const allowDeletes = resolveAllowDeletes(process.env);
 
 // Create server instance
 const server = new Server(
@@ -50,10 +52,13 @@ const server = new Server(
 
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools: createToolDefinitions() };
+  return { tools: createToolDefinitions({ allowDeletes }) };
 });
 
-server.setRequestHandler(CallToolRequestSchema, createToolHandler(foundryClient));
+server.setRequestHandler(
+  CallToolRequestSchema,
+  createToolHandler(foundryClient, { allowDeletes })
+);
 
 // Start the server
 async function main() {

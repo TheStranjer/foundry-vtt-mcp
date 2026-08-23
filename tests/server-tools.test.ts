@@ -5,8 +5,10 @@ import {
 } from "../src/server-tools.js";
 
 describe("server tools", () => {
+  const deletesEnabled = { allowDeletes: true };
+
   test("createToolDefinitions includes document tools", () => {
-    const tools = createToolDefinitions();
+    const tools = createToolDefinitions(deletesEnabled);
     const actorList = tools.find((tool) => tool.name === "get_actors");
     const actorGet = tools.find((tool) => tool.name === "get_actor");
     expect(actorList).toBeTruthy();
@@ -14,7 +16,7 @@ describe("server tools", () => {
   });
 
   test("createToolDefinitions includes compendium tools", () => {
-    const tools = createToolDefinitions();
+    const tools = createToolDefinitions(deletesEnabled);
     const createCompendium = tools.find((tool) => tool.name === "create_compendium");
     const deleteCompendium = tools.find((tool) => tool.name === "delete_compendium");
     expect(createCompendium).toBeTruthy();
@@ -25,7 +27,7 @@ describe("server tools", () => {
   });
 
   test("document tools include pack parameter", () => {
-    const tools = createToolDefinitions();
+    const tools = createToolDefinitions(deletesEnabled);
     const modifyDocument = tools.find((tool) => tool.name === "modify_document");
     const createDocument = tools.find((tool) => tool.name === "create_document");
     const deleteDocument = tools.find((tool) => tool.name === "delete_document");
@@ -33,6 +35,56 @@ describe("server tools", () => {
     expect(modifyDocument?.inputSchema.properties).toHaveProperty("pack");
     expect(createDocument?.inputSchema.properties).toHaveProperty("pack");
     expect(deleteDocument?.inputSchema.properties).toHaveProperty("pack");
+  });
+
+  test("delete tools are disabled by default", () => {
+    const names = createToolDefinitions().map((tool) => tool.name);
+    expect(names).not.toContain("delete_document");
+    expect(names).not.toContain("delete_compendium");
+  });
+
+  test("direct delete calls are rejected by default", async () => {
+    const client = {
+      isConnected: () => true,
+      deleteDocument: jest.fn(),
+      deleteCompendium: jest.fn(),
+    } as any;
+
+    const handler = createToolHandler(client);
+    for (const name of ["delete_document", "delete_compendium"]) {
+      const response = await handler({ params: { name } });
+      expect((response as any).isError).toBe(true);
+      expect(response.content[0].text).toContain("Deletion is disabled");
+    }
+    expect(client.deleteDocument).not.toHaveBeenCalled();
+    expect(client.deleteCompendium).not.toHaveBeenCalled();
+  });
+
+  test("tool annotations describe read-only and destructive behavior", () => {
+    const tools = createToolDefinitions(deletesEnabled);
+    const annotations = (name: string) =>
+      tools.find((tool) => tool.name === name)?.annotations;
+
+    expect(annotations("get_actor")).toEqual({
+      readOnlyHint: true,
+      destructiveHint: false,
+    });
+    expect(annotations("create_document")).toEqual({
+      readOnlyHint: false,
+      destructiveHint: false,
+    });
+    expect(annotations("modify_document")).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+    });
+    expect(annotations("upload_file")).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+    });
+    expect(annotations("delete_document")).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+    });
   });
 
   test("handler blocks when not connected", async () => {
@@ -316,7 +368,7 @@ describe("server tools", () => {
       isConnected: () => true,
     } as any;
 
-    const handler = createToolHandler(client);
+    const handler = createToolHandler(client, deletesEnabled);
     const response = await handler({ params: { name: "delete_document", arguments: { type: "Actor", ids: [] } } });
 
     expect((response as any).isError).toBe(true);
@@ -328,7 +380,7 @@ describe("server tools", () => {
       deleteDocument: jest.fn().mockResolvedValue({ ok: true }),
     } as any;
 
-    const handler = createToolHandler(client);
+    const handler = createToolHandler(client, deletesEnabled);
     const response = await handler({
       params: {
         name: "delete_document",
@@ -349,7 +401,7 @@ describe("server tools", () => {
       deleteDocument: jest.fn().mockResolvedValue({ ok: true }),
     } as any;
 
-    const handler = createToolHandler(client);
+    const handler = createToolHandler(client, deletesEnabled);
     const response = await handler({
       params: {
         name: "delete_document",
@@ -374,7 +426,7 @@ describe("server tools", () => {
       deleteDocument: jest.fn().mockRejectedValue(new Error("Delete failed")),
     } as any;
 
-    const handler = createToolHandler(client);
+    const handler = createToolHandler(client, deletesEnabled);
     const response = await handler({
       params: {
         name: "delete_document",
@@ -725,7 +777,7 @@ describe("server tools", () => {
         isConnected: () => true,
       } as any;
 
-      const handler = createToolHandler(client);
+      const handler = createToolHandler(client, deletesEnabled);
       const response = await handler({
         params: {
           name: "delete_compendium",
@@ -746,7 +798,7 @@ describe("server tools", () => {
         }),
       } as any;
 
-      const handler = createToolHandler(client);
+      const handler = createToolHandler(client, deletesEnabled);
       const response = await handler({
         params: {
           name: "delete_compendium",
@@ -766,7 +818,7 @@ describe("server tools", () => {
         deleteCompendium: jest.fn().mockRejectedValue(new Error("Compendium not found")),
       } as any;
 
-      const handler = createToolHandler(client);
+      const handler = createToolHandler(client, deletesEnabled);
       const response = await handler({
         params: {
           name: "delete_compendium",

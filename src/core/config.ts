@@ -6,3 +6,7 @@ export function resolveConfigPath(
 ): string {
   return env.FOUNDRY_CREDENTIALS || path.join(cwd, "config", "foundry_credentials.json");
 }
+
+export function resolveAllowDeletes(env: NodeJS.ProcessEnv): boolean {
+  return env.FOUNDRY_MCP_ALLOW_DELETES === "true";
+}
