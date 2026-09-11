@@ -3,6 +3,7 @@ export interface FoundryCredential {
   hostname: string;
   password: string;
   userid: string;
+  allow_insecure_tls?: boolean;
 }
 
 export interface CredentialInfo {
@@ -18,6 +19,18 @@ export function parseCredentials(raw: string): FoundryCredential[] {
   if (!Array.isArray(parsed)) {
     throw new Error("Credentials JSON must be an array");
   }
+
+  for (const credential of parsed) {
+    if (
+      typeof credential === "object" &&
+      credential !== null &&
+      "allow_insecure_tls" in credential &&
+      typeof credential.allow_insecure_tls !== "boolean"
+    ) {
+      throw new Error("allow_insecure_tls must be a boolean");
+    }
+  }
+
   return parsed as FoundryCredential[];
 }
 

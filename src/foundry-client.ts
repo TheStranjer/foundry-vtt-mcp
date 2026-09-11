@@ -128,7 +128,10 @@ export class FoundryClient {
    * version cannot be determined, in which case a compatibility strategy that
    * satisfies both mechanisms is used.
    */
-  private async detectGeneration(hostname: string): Promise<number | null> {
+  private async detectGeneration(
+    hostname: string,
+    allowInsecureTls = false
+  ): Promise<number | null> {
     return new Promise((resolve) => {
       const req = this.https.request(
         {
@@ -136,6 +139,7 @@ export class FoundryClient {
           port: 443,
           path: "/api/status",
           method: "GET",
+          ...(allowInsecureTls && { rejectUnauthorized: false }),
         },
         (res) => {
           let data = "";
@@ -166,7 +170,10 @@ export class FoundryClient {
   /**
    * Perform GET /join to retrieve or generate a session cookie
    */
-  private async getSession(hostname: string): Promise<string> {
+  private async getSession(
+    hostname: string,
+    allowInsecureTls = false
+  ): Promise<string> {
     return new Promise((resolve, reject) => {
       const req = this.https.request(
         {
@@ -174,6 +181,7 @@ export class FoundryClient {
           port: 443,
           path: "/join",
           method: "GET",
+          ...(allowInsecureTls && { rejectUnauthorized: false }),
         },
         (res) => {
           const sessionId = extractSessionIdFromCookies(res.headers["set-cookie"]);
@@ -206,6 +214,7 @@ export class FoundryClient {
           port: 443,
           path: "/join",
           method: "POST",
+          ...(credential.allow_insecure_tls && { rejectUnauthorized: false }),
           headers: {
             "Content-Type": "application/json",
             "Content-Length": Buffer.byteLength(payload),
@@ -258,7 +267,8 @@ export class FoundryClient {
   private connectWebSocket(
     hostname: string,
     sessionId: string,
-    generation: number | null = null
+    generation: number | null = null,
+    allowInsecureTls = false
   ): Promise<WebSocket> {
     return new Promise((resolve, reject) => {
       const { url, headers } = selectSocketConnection(generation, hostname, sessionId);
@@ -266,8 +276,12 @@ export class FoundryClient {
         `[FoundryClient] Connecting to WebSocket (Foundry gen ${generation ?? "unknown"}): ${url}`
       );
 
-      const ws = headers
-        ? new this.WebSocketCtor(url, { headers })
+      const options = {
+        ...(headers && { headers }),
+        ...(allowInsecureTls && { rejectUnauthorized: false }),
+      };
+      const ws = Object.keys(options).length
+        ? new this.WebSocketCtor(url, options)
         : new this.WebSocketCtor(url);
 
       ws.on("open", () => {
@@ -395,21 +409,34 @@ export class FoundryClient {
       // Try to re-authenticate first
       const success = await this.authenticate(hostname, sessionId, credential);
       if (success) {
-        const ws = await this.connectWebSocket(hostname, sessionId, generation);
+        const ws = await this.connectWebSocket(
+          hostname,
+          sessionId,
+          generation,
+          credential.allow_insecure_tls
+        );
         this.setupWebSocketHandlers(ws);
         await this.waitForGameSession(ws);
         this.connection.ws = ws;
         this.logger.error("[FoundryClient] Reconnection successful");
       } else {
         // Session may have expired, try full reconnect with new session
-        const newSessionId = await this.getSession(hostname);
+        const newSessionId = await this.getSession(
+          hostname,
+          credential.allow_insecure_tls
+        );
         const newSuccess = await this.authenticate(
           hostname,
           newSessionId,
           credential
         );
         if (newSuccess) {
-          const ws = await this.connectWebSocket(hostname, newSessionId, generation);
+          const ws = await this.connectWebSocket(
+            hostname,
+            newSessionId,
+            generation,
+            credential.allow_insecure_tls
+          );
           this.setupWebSocketHandlers(ws);
           await this.waitForGameSession(ws);
           this.connection.sessionId = newSessionId;
@@ -443,7 +470,10 @@ export class FoundryClient {
 
       try {
         // Step 1: GET /join to get session cookie
-        const sessionId = await this.getSession(hostname);
+        const sessionId = await this.getSession(
+          hostname,
+          credential.allow_insecure_tls
+        );
         this.logger.error(`[FoundryClient] Got session ID: ${sessionId}`);
 
         // Step 2: POST /join to authenticate
@@ -456,10 +486,18 @@ export class FoundryClient {
         }
 
         // Step 3: Detect the Foundry generation to pick the session-binding strategy
-        const generation = await this.detectGeneration(hostname);
+        const generation = await this.detectGeneration(
+          hostname,
+          credential.allow_insecure_tls
+        );
 
         // Step 4: Establish WebSocket connection and wait for the game session to bind
-        const ws = await this.connectWebSocket(hostname, sessionId, generation);
+        const ws = await this.connectWebSocket(
+          hostname,
+          sessionId,
+          generation,
+          credential.allow_insecure_tls
+        );
         this.setupWebSocketHandlers(ws);
         await this.waitForGameSession(ws);
 
@@ -514,15 +552,26 @@ export class FoundryClient {
     }
 
     // Connect to the chosen instance
-    const sessionId = await this.getSession(hostname);
+    const sessionId = await this.getSession(
+      hostname,
+      credential.allow_insecure_tls
+    );
     const success = await this.authenticate(hostname, sessionId, credential);
 
     if (!success) {
       throw new Error(`Authentication failed for ${hostname}`);
     }
 
-    const generation = await this.detectGeneration(hostname);
-    const ws = await this.connectWebSocket(hostname, sessionId, generation);
+    const generation = await this.detectGeneration(
+      hostname,
+      credential.allow_insecure_tls
+    );
+    const ws = await this.connectWebSocket(
+      hostname,
+      sessionId,
+      generation,
+      credential.allow_insecure_tls
+    );
     this.setupWebSocketHandlers(ws);
     await this.waitForGameSession(ws);
 
@@ -1083,6 +1132,9 @@ export class FoundryClient {
           port: 443,
           path: "/upload",
           method: "POST",
+          ...(this.connection!.credential.allow_insecure_tls && {
+            rejectUnauthorized: false,
+          }),
           headers: {
             "Content-Type": `multipart/form-data; boundary=${boundary}`,
             "Content-Length": Buffer.byteLength(formData),

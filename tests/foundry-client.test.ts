@@ -74,6 +74,22 @@ describe("FoundryClient", () => {
     expect(sessionId).toBe("abc123");
   });
 
+  test("getSession allows insecure TLS when requested", async () => {
+    const https = createHttpsStub((_, callback) => {
+      const res = new EventEmitter() as any;
+      res.headers = { "set-cookie": ["session=abc123; Path=/"] };
+      callback(res);
+    });
+    const { client } = createClient({ https });
+
+    await (client as any).getSession("host", true);
+
+    expect(https.request).toHaveBeenCalledWith(
+      expect.objectContaining({ rejectUnauthorized: false }),
+      expect.any(Function)
+    );
+  });
+
   test("getSession generates when no cookie", async () => {
     const https = createHttpsStub((_, callback) => {
       const res = new EventEmitter() as any;
@@ -121,6 +137,30 @@ describe("FoundryClient", () => {
       userid: "user",
     });
     expect(success).toBe(true);
+  });
+
+  test("authenticate allows insecure TLS from credentials", async () => {
+    const https = createHttpsStub((_req, callback) => {
+      const res = new EventEmitter() as any;
+      res.statusCode = 200;
+      callback(res);
+      res.emit("data", JSON.stringify({ status: "success" }));
+      res.emit("end");
+    });
+    const { client } = createClient({ https });
+
+    await (client as any).authenticate("host", "sid", {
+      _id: "x",
+      hostname: "host",
+      password: "pw",
+      userid: "user",
+      allow_insecure_tls: true,
+    });
+
+    expect(https.request).toHaveBeenCalledWith(
+      expect.objectContaining({ rejectUnauthorized: false }),
+      expect.any(Function)
+    );
   });
 
   test("authenticate returns false on failure", async () => {
@@ -232,6 +272,30 @@ describe("FoundryClient", () => {
     jest.useRealTimers();
   });
 
+  test("connectWebSocket allows insecure TLS when requested", async () => {
+    jest.useFakeTimers();
+    let created: TestWebSocket | null = null;
+    let ctorOpts: any;
+    class Ws extends TestWebSocket {
+      constructor(url: string, opts?: unknown) {
+        super(url);
+        created = this;
+        ctorOpts = opts;
+      }
+    }
+
+    const { client } = createClient({ WebSocketCtor: Ws as any });
+    const promise = (client as any).connectWebSocket("host", "sid", 14, true);
+    created?.emit("open");
+
+    await expect(promise).resolves.toBe(created);
+    expect(ctorOpts).toEqual({
+      headers: { Cookie: "session=sid" },
+      rejectUnauthorized: false,
+    });
+    jest.useRealTimers();
+  });
+
   test("connectWebSocket binds the session via query param for Foundry v13", async () => {
     jest.useFakeTimers();
     let created: TestWebSocket | null = null;
@@ -269,6 +333,24 @@ describe("FoundryClient", () => {
     await expect((client as any).detectGeneration("host")).resolves.toBe(14);
     expect(https.request).toHaveBeenCalledWith(
       expect.objectContaining({ hostname: "host", path: "/api/status", method: "GET" }),
+      expect.any(Function)
+    );
+  });
+
+  test("detectGeneration allows insecure TLS when requested", async () => {
+    const https = createHttpsStub((_req, callback) => {
+      const res = new EventEmitter() as any;
+      res.statusCode = 200;
+      callback(res);
+      res.emit("data", JSON.stringify({ active: true, version: "14.364" }));
+      res.emit("end");
+    });
+    const { client } = createClient({ https });
+
+    await (client as any).detectGeneration("host", true);
+
+    expect(https.request).toHaveBeenCalledWith(
+      expect.objectContaining({ rejectUnauthorized: false }),
       expect.any(Function)
     );
   });
@@ -866,7 +948,7 @@ describe("FoundryClient", () => {
       })).rejects.toThrow("Not connected to Foundry server");
     });
 
-    test("uploads base64 image data successfully", async () => {
+    test("uploads base64 image data with configured TLS option", async () => {
       const https = createHttpsStub((_req, callback) => {
         const res = new EventEmitter() as any;
         res.statusCode = 200;
@@ -884,7 +966,13 @@ describe("FoundryClient", () => {
       const ws = new TestWebSocket("ws://host");
       (client as any).connection = {
         hostname: "host",
-        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        credential: {
+          _id: "c",
+          hostname: "host",
+          password: "p",
+          userid: "u",
+          allow_insecure_tls: true,
+        } as FoundryCredential,
         sessionId: "sid",
         ws,
       };
@@ -901,6 +989,7 @@ describe("FoundryClient", () => {
           hostname: "host",
           path: "/upload",
           method: "POST",
+          rejectUnauthorized: false,
         }),
         expect.any(Function)
       );

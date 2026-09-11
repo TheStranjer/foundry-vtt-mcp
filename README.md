@@ -66,6 +66,9 @@ Create a file at `config/foundry_credentials.json`:
 - `hostname` - The domain/IP of your FoundryVTT server
 - `userid` - Your Foundry user document ID (find by inspecting Users in Foundry admin panel)
 - `password` - Your Foundry user password
+- `allow_insecure_tls` - Optional. Set to `true` only for a trusted Foundry server with a self-signed certificate. Defaults to `false`.
+
+Disabling TLS verification makes the connection vulnerable to interception. Prefer a trusted certificate when one is available.
 
 You can configure multiple Foundry instances and switch between them at runtime using the `choose_foundry_instance` tool.
 

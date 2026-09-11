@@ -26,6 +26,18 @@ describe("credentials", () => {
       .toThrow();
   });
 
+  test("parseCredentials rejects a non-boolean insecure TLS option", () => {
+    expect(() => parseCredentials(JSON.stringify([
+      {
+        _id: "alpha",
+        hostname: "a.example",
+        password: "p1",
+        userid: "u1",
+        allow_insecure_tls: "false",
+      },
+    ]))).toThrow("allow_insecure_tls must be a boolean");
+  });
+
   test("getCredentialsInfo maps active index", () => {
     const info = getCredentialsInfo(creds, 1);
     expect(info).toEqual([
