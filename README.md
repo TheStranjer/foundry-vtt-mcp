@@ -130,6 +130,7 @@ These tools retrieve all documents of a given type from the connected world.
 - `max_length` (integer, optional): Maximum response size in bytes. Documents are removed from the response until it fits within this limit.
 - `requested_fields` (string[], optional): Specific fields to include. Supports dot-notation for nested fields (e.g. `system.attributes.hp`). Always includes `_id` and `name`. If omitted, all fields are returned. See [Selecting nested fields](#selecting-nested-fields) below.
 - `where` (object, optional): Filter documents by field values. See [Filtering with `where`](#filtering-with-where) below.
+- `pack` (string, optional): Read from a compendium pack instead of the world (e.g. `my-module.items`). Only available on `get_actors`, `get_items`, `get_scenes`, `get_journals`, `get_macros`, `get_cards`, `get_playlists` and `get_tables`, and the pack must hold that document type. Use [`get_compendiums`](#get_compendiums) to find pack IDs. `max_length`, `requested_fields` and `where` work the same way on compendium results.
 
 ### Document Retrieval (Single)
 
@@ -156,12 +157,20 @@ These tools retrieve a single document by ID or name.
 - `_id` (string): Document ID (alias)
 - `name` (string): Document name
 - `requested_fields` (string[], optional): Specific fields to include. Supports dot-notation for nested fields (e.g. `system.attributes.hp`). Always includes `_id` and `name`. If omitted, all fields are returned. See [Selecting nested fields](#selecting-nested-fields) below.
+- `pack` (string, optional): Read the document from a compendium pack instead of the world. Same tools and rules as the list tools above.
 
 ### World Metadata
 
 #### `get_world`
 
 Get world metadata from FoundryVTT (title, system, version, etc.), excluding document collections like actors or items. Use the `get_*` document tools for collection data.
+
+#### `get_compendiums`
+
+List the compendium packs in the world (`id`, `label`, document `type`, owning package). Pass a pack's `id` as the `pack` parameter of the `get_*` tools to read its documents.
+
+**Parameters:**
+- `type` (string, optional): Only list packs holding this document type (e.g. `Item`, `Actor`, `JournalEntry`). Case-insensitive.
 
 ### Document Manipulation
 

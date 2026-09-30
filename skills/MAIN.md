@@ -87,6 +87,7 @@ Same names without `s` suffix: `get_actor`, `get_item`, `get_scene`, etc.
 | `show_credentials` | List configured Foundry instances |
 | `choose_foundry_instance` | Switch active instance by `_id` or `item_order` |
 | `get_world` | Get world metadata (title, system, version) |
+| `get_compendiums` | List compendium packs; pass a pack `id` as `pack` to `get_actors`/`get_items`/etc. to read from it |
 
 ## Best Practices
 

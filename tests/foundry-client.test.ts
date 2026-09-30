@@ -571,6 +571,158 @@ describe("FoundryClient", () => {
       .resolves.toBeNull();
   });
 
+  describe("compendium reads", () => {
+    const worldPacks = [
+      { id: "world.my-items", label: "My Items", type: "Item", packageType: "world", packageName: "w", index: [] },
+      { id: "my-module.actors", label: "Actors", type: "Actor", packageType: "module", packageName: "my-module" },
+    ];
+
+    test("getCompendiums lists packs and filters by type", async () => {
+      const { client } = createClient();
+      jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
+
+      await expect(client.getCompendiums()).resolves.toEqual([
+        { id: "world.my-items", label: "My Items", type: "Item", packageType: "world", packageName: "w" },
+        { id: "my-module.actors", label: "Actors", type: "Actor", packageType: "module", packageName: "my-module" },
+      ]);
+      await expect(client.getCompendiums({ type: "actor" }))
+        .resolves.toEqual([
+          { id: "my-module.actors", label: "Actors", type: "Actor", packageType: "module", packageName: "my-module" },
+        ]);
+    });
+
+    test("getPackDocuments sends a get operation with the pack and an empty query", async () => {
+      const { client } = createClient();
+      jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
+      jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({
+        result: [
+          { _id: "1", name: "Sword", type: "weapon" },
+          { _id: "2", name: "Potion", type: "consumable" },
+        ],
+      });
+
+      const docs = await client.getPackDocuments("Item", "world.my-items", {
+        where: { type: "weapon" },
+        requestedFields: ["type"],
+      });
+
+      expect(docs).toEqual([{ _id: "1", name: "Sword", type: "weapon" }]);
+      expect((client as any).sendModifyDocumentRequest).toHaveBeenCalledWith(
+        "Item",
+        "get",
+        { action: "get", pack: "world.my-items", query: {}, index: false, broadcast: false },
+        expect.any(String),
+        expect.any(Function),
+        "getPackDocuments"
+      );
+    });
+
+    test("getPackDocuments only matches responses that carry a result array", async () => {
+      const { client } = createClient();
+      jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
+      jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({ result: [] });
+
+      await client.getPackDocuments("Item", "world.my-items");
+
+      const isMatch = (client as any).sendModifyDocumentRequest.mock.calls[0][4] as (r: any) => boolean;
+      expect(isMatch({ result: [] })).toBe(true);
+      expect(isMatch({ result: undefined })).toBe(false);
+      expect(isMatch({})).toBe(false);
+    });
+
+    test("getPackDocuments truncates to maxLength", async () => {
+      const { client } = createClient();
+      jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
+      jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({
+        result: [
+          { _id: "1", name: "A".repeat(200) },
+          { _id: "2", name: "B".repeat(200) },
+        ],
+      });
+
+      const docs = await client.getPackDocuments("Item", "world.my-items", { maxLength: 260 });
+
+      expect(docs).toHaveLength(1);
+    });
+
+    test("getPackDocuments rejects an unknown pack without sending a request", async () => {
+      const { client } = createClient();
+      jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
+      const send = jest.spyOn(client as any, "sendModifyDocumentRequest");
+
+      await expect(client.getPackDocuments("Item", "world.nope"))
+        .rejects.toThrow('Compendium pack "world.nope" not found');
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    test("getPackDocuments rejects a pack that holds another document type", async () => {
+      const { client } = createClient();
+      jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
+      const send = jest.spyOn(client as any, "sendModifyDocumentRequest");
+
+      await expect(client.getPackDocuments("Actor", "world.my-items"))
+        .rejects.toThrow("holds Item documents, not Actor");
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    test("getPackDocuments surfaces a server error message", async () => {
+      const { client } = createClient();
+      jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
+      jest.spyOn(client as any, "sendModifyDocumentRequest")
+        .mockResolvedValue({ error: { class: "ServerError", message: "boom" } });
+
+      await expect(client.getPackDocuments("Item", "world.my-items")).rejects.toThrow("boom");
+    });
+
+    test("getPackDocument queries by _id, id, or name and returns the first match", async () => {
+      const { client } = createClient();
+      jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
+      const send = jest.spyOn(client as any, "sendModifyDocumentRequest")
+        .mockResolvedValue({ result: [{ _id: "1", name: "Sword" }] });
+
+      await expect(client.getPackDocument("Item", "world.my-items", { _id: "1" }))
+        .resolves.toEqual({ _id: "1", name: "Sword" });
+      await expect(client.getPackDocument("Item", "world.my-items", { id: "1" }))
+        .resolves.toEqual({ _id: "1", name: "Sword" });
+      await expect(client.getPackDocument("Item", "world.my-items", { name: "Sword" }))
+        .resolves.toEqual({ _id: "1", name: "Sword" });
+
+      expect(send.mock.calls.map((call) => (call[2] as any).query)).toEqual([
+        { _id: "1" },
+        { _id: "1" },
+        { name: "Sword" },
+      ]);
+    });
+
+    test("getPackDocument returns null when nothing matches or no identifier is given", async () => {
+      const { client } = createClient();
+      jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
+      const send = jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({ result: [] });
+
+      await expect(client.getPackDocument("Item", "world.my-items", { name: "Missing" }))
+        .resolves.toBeNull();
+      send.mockClear();
+      await expect(client.getPackDocument("Item", "world.my-items", {})).resolves.toBeNull();
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    test("getPackDocument filters fields with dot notation", async () => {
+      const { client } = createClient();
+      jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
+      jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({
+        result: [{ _id: "1", name: "Rune", system: { price: { value: 10000, denomination: "gp" }, weight: 1 } }],
+      });
+
+      await expect(
+        client.getPackDocument("Item", "world.my-items", { _id: "1" }, { requestedFields: ["system.price"] })
+      ).resolves.toEqual({
+        _id: "1",
+        name: "Rune",
+        system: { price: { value: 10000, denomination: "gp" } },
+      });
+    });
+  });
+
   test("modifyDocument builds operation", async () => {
     const { client } = createClient({ now: () => 123, WebSocketCtor: TestWebSocket });
     jest.spyOn(client as any, "sendModifyDocumentRequest")

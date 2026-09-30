@@ -5,23 +5,36 @@ export interface DocumentTypeConfig {
   plural: string;
   collection: string;
   description: string;
+  /** Foundry document class name, set only for types that can live in a compendium pack. */
+  documentName?: string;
 }
 
 export const DOCUMENT_TYPES: DocumentTypeConfig[] = [
-  { singular: "actor", plural: "actors", collection: "actors", description: "actor" },
-  { singular: "item", plural: "items", collection: "items", description: "item" },
+  { singular: "actor", plural: "actors", collection: "actors", description: "actor", documentName: "Actor" },
+  { singular: "item", plural: "items", collection: "items", description: "item", documentName: "Item" },
   { singular: "folder", plural: "folders", collection: "folders", description: "folder" },
   { singular: "user", plural: "users", collection: "users", description: "user" },
-  { singular: "scene", plural: "scenes", collection: "scenes", description: "scene" },
-  { singular: "journal", plural: "journals", collection: "journal", description: "journal entry" },
-  { singular: "macro", plural: "macros", collection: "macros", description: "macro" },
-  { singular: "card", plural: "cards", collection: "cards", description: "card" },
-  { singular: "playlist", plural: "playlists", collection: "playlists", description: "playlist" },
-  { singular: "table", plural: "tables", collection: "tables", description: "table" },
+  { singular: "scene", plural: "scenes", collection: "scenes", description: "scene", documentName: "Scene" },
+  { singular: "journal", plural: "journals", collection: "journal", description: "journal entry", documentName: "JournalEntry" },
+  { singular: "macro", plural: "macros", collection: "macros", description: "macro", documentName: "Macro" },
+  { singular: "card", plural: "cards", collection: "cards", description: "card", documentName: "Cards" },
+  { singular: "playlist", plural: "playlists", collection: "playlists", description: "playlist", documentName: "Playlist" },
+  { singular: "table", plural: "tables", collection: "tables", description: "table", documentName: "RollTable" },
   { singular: "combat", plural: "combats", collection: "combats", description: "combats" },
   { singular: "message", plural: "messages", collection: "messages", description: "messages" },
   { singular: "setting", plural: "settings", collection: "settings", description: "settings" },
 ];
+
+function packProperty(config: DocumentTypeConfig) {
+  return config.documentName
+    ? {
+        pack: {
+          type: "string",
+          description: `Optional. A compendium pack ID (e.g., "world.my-${config.plural}" or "my-module.${config.plural}"; list them with get_compendiums). If provided, reads ${config.plural} from that compendium instead of the world. The pack must hold ${config.documentName} documents.`,
+        },
+      }
+    : {};
+}
 
 export function generateListToolDefinition(config: DocumentTypeConfig) {
   return {
@@ -44,6 +57,7 @@ export function generateListToolDefinition(config: DocumentTypeConfig) {
           additionalProperties: true,
           description: `Filter ${config.plural} by field values. Provide key-value pairs to match. All conditions must match (AND logic). Example: {"folder": "abc123"} returns only ${config.plural} in that folder. Example: {"folder": "abc123", "type": "npc"} returns only ${config.plural} matching both conditions.`,
         },
+        ...packProperty(config),
       },
       required: [],
     },
@@ -74,11 +88,27 @@ export function generateGetToolDefinition(config: DocumentTypeConfig) {
           items: { type: "string" },
           description: `Array of field names to include in the ${config.description} object. Supports dot-notation for nested fields (e.g. "system.aspirations"), which returns just that nested value under its parent. Always includes _id and name. If empty, undefined, or null, all fields are included.`,
         },
+        ...packProperty(config),
       },
       required: [],
     },
   };
 }
+
+export const getCompendiumsTool = {
+  name: "get_compendiums",
+  description: `List the compendium packs in FoundryVTT (id, label, document type, owning package). Use a pack's id as the "pack" parameter of the get_* tools to read documents from it.`,
+  inputSchema: {
+    type: "object",
+    properties: {
+      type: {
+        type: "string",
+        description: `Optional. Only list packs that hold this document type (e.g., "Item", "Actor", "JournalEntry"). Case-insensitive.`,
+      },
+    },
+    required: [],
+  },
+};
 
 export const modifyDocumentTool = {
   name: "modify_document",
@@ -334,6 +364,7 @@ export function createToolDefinitions() {
       generateGetToolDefinition(config),
     ]),
     getWorldTool,
+    getCompendiumsTool,
     modifyDocumentTool,
     createDocumentTool,
     deleteDocumentTool,
@@ -375,6 +406,21 @@ export function createToolHandler(foundryClient: FoundryClient) {
           const maxLength = args?.max_length as number | undefined;
           const requestedFields = args?.requested_fields as string[] | undefined;
           const where = args?.where as Record<string, unknown> | undefined;
+          const pack = args?.pack as string | undefined;
+
+          if (pack) {
+            if (!config.documentName) {
+              return errorResponse(`Error: ${config.plural} cannot be stored in a compendium`);
+            }
+
+            const packDocs = await foundryClient.getPackDocuments(config.documentName, pack, {
+              maxLength: maxLength || null,
+              requestedFields: requestedFields || null,
+              where: where || null,
+            });
+
+            return successResponse(packDocs);
+          }
 
           const docs = await foundryClient.getDocuments(config.collection, {
             maxLength: maxLength || null,
@@ -396,16 +442,29 @@ export function createToolHandler(foundryClient: FoundryClient) {
           const _id = args?._id as string | undefined;
           const docName = args?.name as string | undefined;
           const requestedFields = args?.requested_fields as string[] | undefined;
+          const pack = args?.pack as string | undefined;
 
           if (!id && !_id && !docName) {
             return errorResponse("Error: Must provide at least one of: id, _id, or name");
           }
 
-          const doc = await foundryClient.getDocument(
-            config.collection,
-            { id, _id, name: docName },
-            { requestedFields: requestedFields || null }
-          );
+          if (pack && !config.documentName) {
+            return errorResponse(`Error: ${config.plural} cannot be stored in a compendium`);
+          }
+
+          const doc =
+            pack && config.documentName
+              ? await foundryClient.getPackDocument(
+                  config.documentName,
+                  pack,
+                  { id, _id, name: docName },
+                  { requestedFields: requestedFields || null }
+                )
+              : await foundryClient.getDocument(
+                  config.collection,
+                  { id, _id, name: docName },
+                  { requestedFields: requestedFields || null }
+                );
 
           if (!doc) {
             return {
@@ -424,6 +483,18 @@ export function createToolHandler(foundryClient: FoundryClient) {
             `Error fetching ${config.description}: ${error instanceof Error ? error.message : String(error)}`
           );
         }
+      }
+    }
+
+    if (name === "get_compendiums") {
+      try {
+        const type = args?.type as string | undefined;
+        const packs = await foundryClient.getCompendiums({ type: type || null });
+        return successResponse(packs);
+      } catch (error) {
+        return errorResponse(
+          `Error fetching compendiums: ${error instanceof Error ? error.message : String(error)}`
+        );
       }
     }
 
