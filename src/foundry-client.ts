@@ -210,6 +210,7 @@ export class FoundryClient {
             "Content-Type": "application/json",
             "Content-Length": Buffer.byteLength(payload),
             Cookie: `session=${sessionId}`,
+            Origin: `https://${hostname}`,
           },
         },
         (res) => {

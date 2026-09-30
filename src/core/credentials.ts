@@ -3,6 +3,8 @@ export interface FoundryCredential {
   hostname: string;
   password: string;
   userid: string;
+  /** Foundry username; required by v14 for /join */
+  username?: string;
 }
 
 export interface CredentialInfo {

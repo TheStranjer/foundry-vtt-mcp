@@ -28,9 +28,21 @@ describe("session", () => {
     });
     expect(JSON.parse(payload)).toEqual({
       userid: "user",
+      userId: "user",
       password: "pw",
       action: "join",
     });
+  });
+
+  test("buildJoinPayload includes username when provided", () => {
+    const payload = buildJoinPayload({
+      _id: "c1",
+      hostname: "h",
+      password: "pw",
+      userid: "user",
+      username: "API",
+    });
+    expect(JSON.parse(payload)).toMatchObject({ userId: "user", username: "API" });
   });
 
   test("parseJoinResponse succeeds on status success", () => {
