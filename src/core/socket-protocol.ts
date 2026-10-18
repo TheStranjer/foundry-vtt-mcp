@@ -114,6 +114,16 @@ export function parseAckMessage(message: string): {
   }
 }
 
+/**
+ * The ack id of a Socket.IO ack frame (`43<id>[...]`), or null when the frame carries none.
+ * Requests are sent as `42<id>[...]` and Foundry answers with the same id, so a handler can
+ * tell its own response from a concurrent request's response of the same document type.
+ */
+export function ackIdOf(message: string): number | null {
+  const match = /^43(\d+)\[/.exec(message);
+  return match ? Number(match[1]) : null;
+}
+
 export function buildModifyDocumentMessage(
   ackId: number,
   payload: unknown
