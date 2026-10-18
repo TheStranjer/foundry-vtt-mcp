@@ -19,6 +19,7 @@ import {
   truncateDocuments,
 } from "./core/document-utils.js";
 import { type PackSummary, summarizePacks, validatePackAccess } from "./core/compendium.js";
+import { COLLECTION_DOCUMENT_NAMES, buildIdentifierQuery, whereToServerQuery } from "./core/collections.js";
 import { buildDocumentOperation } from "./core/operations.js";
 import {
   buildModifyDocumentMessage,
@@ -803,12 +804,7 @@ export class FoundryClient {
     const requestedFields = options?.requestedFields ?? null;
     const where = options?.where ?? null;
 
-    const worldData = await this.requestWorldData();
-    const docs = worldData[collection] as Record<string, unknown>[] | undefined;
-
-    if (!docs || !Array.isArray(docs)) {
-      throw new Error(`Response does not contain ${collection} array`);
-    }
+    const docs = await this.queryWorldDocuments(collection, whereToServerQuery(where));
 
     // Apply where filter first
     let filteredDocs = this.filterDocumentsByWhere(docs, where);
@@ -840,12 +836,12 @@ export class FoundryClient {
   ): Promise<Record<string, unknown> | null> {
     const requestedFields = options?.requestedFields ?? null;
 
-    const worldData = await this.requestWorldData();
-    const docs = worldData[collection] as Record<string, unknown>[] | undefined;
-
-    if (!docs || !Array.isArray(docs)) {
-      throw new Error(`Response does not contain ${collection} array`);
+    const query = buildIdentifierQuery(identifier);
+    if (!query) {
+      return null;
     }
+
+    const docs = await this.queryWorldDocuments(collection, query);
 
     // Find the document by id, _id, or name
     let doc: Record<string, unknown> | undefined;
@@ -930,6 +926,46 @@ export class FoundryClient {
     );
 
     return truncateDocuments(filteredDocs, options?.maxLength ?? 0);
+  }
+
+  /**
+   * Read the documents of one world collection with a modifyDocument "get", so the server
+   * sends only that document type (filtered by `query`) instead of the whole world payload.
+   * Collections without a known document class fall back to the world payload.
+   */
+  private async queryWorldDocuments(
+    collection: string,
+    query: Record<string, unknown>
+  ): Promise<Record<string, unknown>[]> {
+    const documentName = COLLECTION_DOCUMENT_NAMES[collection];
+    if (!documentName) {
+      const worldData = await this.requestWorldData();
+      const docs = worldData[collection] as Record<string, unknown>[] | undefined;
+      if (!docs || !Array.isArray(docs)) {
+        throw new Error(`Response does not contain ${collection} array`);
+      }
+      return docs;
+    }
+
+    const response = await this.sendModifyDocumentRequest(
+      documentName,
+      "get",
+      { action: "get", query, index: false, broadcast: false },
+      `Timeout waiting for ${collection} read response (30s)`,
+      (responseData) => Array.isArray(responseData.result),
+      "getWorldDocuments"
+    );
+
+    if (response.error) {
+      const error = response.error as { message?: unknown };
+      throw new Error(typeof error.message === "string" ? error.message : String(response.error));
+    }
+
+    if (!Array.isArray(response.result)) {
+      throw new Error(`Response does not contain ${collection} array`);
+    }
+
+    return response.result as Record<string, unknown>[];
   }
 
   /**

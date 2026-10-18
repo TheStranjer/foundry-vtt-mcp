@@ -560,7 +560,7 @@ describe("FoundryClient", () => {
 
   test("getDocuments validates collection", async () => {
     const { client } = createClient();
-    jest.spyOn(client, "requestWorldData").mockResolvedValue({});
+    jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({});
 
     await expect(client.getDocuments("actors"))
       .rejects.toThrow("Response does not contain actors array");
@@ -568,8 +568,8 @@ describe("FoundryClient", () => {
 
   test("getDocuments filters and truncates", async () => {
     const { client } = createClient();
-    jest.spyOn(client, "requestWorldData").mockResolvedValue({
-      actors: [
+    jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({
+      result: [
         { _id: "1", name: "A", type: "npc" },
         { _id: "2", name: "B", type: "pc" },
       ],
@@ -586,8 +586,8 @@ describe("FoundryClient", () => {
 
   test("getDocument resolves dot-notation fields end to end", async () => {
     const { client } = createClient();
-    jest.spyOn(client, "requestWorldData").mockResolvedValue({
-      actors: [
+    jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({
+      result: [
         {
           _id: "jJ10LA0URnIaLu7g",
           name: "Bezaliel",
@@ -630,8 +630,8 @@ describe("FoundryClient", () => {
 
   test("getDocument resolves by id and name", async () => {
     const { client } = createClient();
-    jest.spyOn(client, "requestWorldData").mockResolvedValue({
-      items: [
+    jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({
+      result: [
         { _id: "1", id: "1", name: "A" },
         { _id: "2", id: "2", name: "B" },
       ],
@@ -647,7 +647,7 @@ describe("FoundryClient", () => {
 
   test("getDocument returns null when missing", async () => {
     const { client } = createClient();
-    jest.spyOn(client, "requestWorldData").mockResolvedValue({ items: [] });
+    jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({ result: [] });
 
     await expect(client.getDocument("items", { name: "Missing" }))
       .resolves.toBeNull();
@@ -803,6 +803,78 @@ describe("FoundryClient", () => {
         system: { price: { value: 10000, denomination: "gp" } },
       });
     });
+  });
+
+  test("getDocuments asks the server for one document type, not the whole world", async () => {
+    const { client } = createClient();
+    const world = jest.spyOn(client, "requestWorldData");
+    const get = jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({ result: [] });
+
+    await client.getDocuments("journal");
+
+    expect(world).not.toHaveBeenCalled();
+    expect(get).toHaveBeenCalledWith(
+      "JournalEntry",
+      "get",
+      { action: "get", query: {}, index: false, broadcast: false },
+      expect.any(String),
+      expect.any(Function),
+      "getWorldDocuments"
+    );
+  });
+
+  test("getDocument filters by _id or name on the server", async () => {
+    const { client } = createClient();
+    const get = jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({ result: [] });
+
+    await client.getDocument("actors", { id: "abc" });
+    await client.getDocument("actors", { _id: "def" });
+    await client.getDocument("messages", { name: "Hello" });
+
+    expect(get.mock.calls.map((c) => [c[0], (c[2] as any).query])).toEqual([
+      ["Actor", { _id: "abc" }],
+      ["Actor", { _id: "def" }],
+      ["ChatMessage", { name: "Hello" }],
+    ]);
+  });
+
+  test("scalar top-level where keys are sent as the server query", async () => {
+    const { client } = createClient();
+    const get = jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({
+      result: [{ _id: "1", name: "A", type: "npc", folder: null }],
+    });
+
+    const docs = await client.getDocuments("actors", {
+      where: { type: "npc", folder: null, "system.level": 3, flags: { x: 1 } },
+    });
+
+    expect((get.mock.calls[0][2] as any).query).toEqual({ type: "npc" });
+    // The local filter still runs on what the server returns.
+    expect(docs).toEqual([]);
+  });
+
+  test("getDocument without an identifier sends nothing", async () => {
+    const { client } = createClient();
+    const get = jest.spyOn(client as any, "sendModifyDocumentRequest");
+
+    await expect(client.getDocument("actors", {})).resolves.toBeNull();
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  test("getDocuments surfaces a server error message", async () => {
+    const { client } = createClient();
+    jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({ error: { message: "nope" } });
+
+    await expect(client.getDocuments("items")).rejects.toThrow("nope");
+  });
+
+  test("getDocuments falls back to the world payload for an unmapped collection", async () => {
+    const { client } = createClient();
+    jest.spyOn(client, "requestWorldData").mockResolvedValue({ widgets: [{ _id: "1", name: "W" }] });
+    const get = jest.spyOn(client as any, "sendModifyDocumentRequest");
+
+    await expect(client.getDocuments("widgets")).resolves.toEqual([{ _id: "1", name: "W" }]);
+    expect(get).not.toHaveBeenCalled();
   });
 
   test("modifyDocument builds operation", async () => {

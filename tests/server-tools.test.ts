@@ -71,8 +71,8 @@ describe("server tools", () => {
     } as any);
 
     jest.spyOn(client, "isConnected").mockReturnValue(true);
-    jest.spyOn(client, "requestWorldData").mockResolvedValue({
-      actors: [
+    jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({
+      result: [
         {
           _id: "jJ10LA0URnIaLu7g",
           name: "Bezaliel",
