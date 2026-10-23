@@ -494,6 +494,139 @@ describe("FoundryClient", () => {
     expect(connectWebSocket).toHaveBeenCalled();
   });
 
+  test("fetchJoinUsers requests join data after the Socket.IO connect and closes the socket", async () => {
+    const { client, wsLogger } = createClient();
+    const ws = new TestWebSocket("ws://host");
+    const connectWebSocket = jest.spyOn(client as any, "connectWebSocket").mockResolvedValue(ws);
+    (client as any).messageCounter = 5;
+
+    const promise = (client as any).fetchJoinUsers("host", "sid", 14, true);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    ws.emit("message", '0{"sid":"x"}');
+    expect(ws.send).toHaveBeenLastCalledWith("40");
+    ws.emit("message", "2");
+    expect(ws.send).toHaveBeenLastCalledWith("3");
+    ws.emit("message", '40{"sid":"y"}');
+    expect(ws.send).toHaveBeenLastCalledWith('425["getJoinData"]');
+    ws.emit("message", '42["session",null]');
+    ws.emit("message", '434[{"users":[]}]');
+    ws.emit("message", '435[{"users":[{"_id":"u1","name":"API"}]}]');
+
+    await expect(promise).resolves.toEqual([{ id: "u1", name: "API" }]);
+    expect(connectWebSocket).toHaveBeenCalledWith("host", "sid", 14, true);
+    expect(ws.close).toHaveBeenCalled();
+    expect(wsLogger.logOutbound).toHaveBeenCalledWith('425["getJoinData"]');
+  });
+
+  test("fetchJoinUsers rejects on malformed join data and closes the socket", async () => {
+    const { client } = createClient();
+    const ws = new TestWebSocket("ws://host");
+    jest.spyOn(client as any, "connectWebSocket").mockResolvedValue(ws);
+    (client as any).messageCounter = 1;
+
+    const promise = (client as any).fetchJoinUsers("host", "sid", null);
+    await Promise.resolve();
+    await Promise.resolve();
+    ws.emit("message", '431[{"world":{}}]');
+
+    await expect(promise).rejects.toThrow("missing users array");
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  test("fetchJoinUsers times out", async () => {
+    jest.useFakeTimers();
+    const { client } = createClient();
+    const ws = new TestWebSocket("ws://host");
+    jest.spyOn(client as any, "connectWebSocket").mockResolvedValue(ws);
+
+    const promise = (client as any).fetchJoinUsers("host", "sid", null);
+    const assertion = expect(promise).rejects.toThrow("Timed out waiting for Foundry join data");
+    await Promise.resolve();
+    await Promise.resolve();
+    jest.advanceTimersByTime(10000);
+
+    await assertion;
+    expect(ws.close).toHaveBeenCalled();
+    jest.useRealTimers();
+  });
+
+  test("completeUserIdentity skips the lookup when both fields are set", async () => {
+    const { client } = createClient();
+    const fetchJoinUsers = jest.spyOn(client as any, "fetchJoinUsers");
+    const credential = { _id: "c", hostname: "h", password: "p", userid: "u", username: "API" };
+
+    await expect((client as any).completeUserIdentity("h", "sid", credential)).resolves.toBe(credential);
+    expect(fetchJoinUsers).not.toHaveBeenCalled();
+  });
+
+  test("completeUserIdentity looks up the missing field", async () => {
+    const { client } = createClient();
+    jest.spyOn(client as any, "detectGeneration").mockResolvedValue(13);
+    const fetchJoinUsers = jest
+      .spyOn(client as any, "fetchJoinUsers")
+      .mockResolvedValue([{ id: "u9", name: "API" }]);
+
+    await expect((client as any).completeUserIdentity("h", "sid", {
+      _id: "c", hostname: "h", password: "p", username: "API", allow_insecure_tls: true,
+    })).resolves.toMatchObject({ userid: "u9", username: "API" });
+    expect(fetchJoinUsers).toHaveBeenCalledWith("h", "sid", 13, true);
+  });
+
+  test("completeUserIdentity falls back to the given credential when the lookup fails", async () => {
+    const { client, logger } = createClient();
+    jest.spyOn(client as any, "detectGeneration").mockResolvedValue(13);
+    jest.spyOn(client as any, "fetchJoinUsers").mockRejectedValue(new Error("no join data"));
+    const credential = { _id: "c", hostname: "h", password: "p", userid: "u" };
+
+    await expect((client as any).completeUserIdentity("h", "sid", credential)).resolves.toBe(credential);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining("no join data"));
+  });
+
+  test("connect authenticates with the inferred identity and remembers it", async () => {
+    const creds = [{ _id: "a", hostname: "a", password: "p", userid: "u1" }];
+    const { client } = createClient({ fs: { readFileSync: jest.fn(() => JSON.stringify(creds)) } });
+
+    jest.spyOn(client as any, "getSession").mockResolvedValue("sid");
+    jest.spyOn(client as any, "fetchJoinUsers").mockResolvedValue([{ id: "u1", name: "API" }]);
+    const authenticate = jest.spyOn(client as any, "authenticate").mockResolvedValue(true);
+    jest.spyOn(client as any, "detectGeneration").mockResolvedValue(14);
+    jest.spyOn(client as any, "connectWebSocket").mockResolvedValue(new TestWebSocket("ws://a"));
+    jest.spyOn(client as any, "setupWebSocketHandlers").mockImplementation(() => undefined);
+    jest.spyOn(client as any, "waitForGameSession").mockResolvedValue(undefined);
+
+    await client.connect();
+
+    expect(authenticate).toHaveBeenCalledWith(
+      "a",
+      "sid",
+      expect.objectContaining({ userid: "u1", username: "API" })
+    );
+    expect(client.getCredentialsInfo()[0]).toMatchObject({ userid: "u1", username: "API" });
+  });
+
+  test("chooseFoundryInstance authenticates with the inferred identity", async () => {
+    const creds = [{ _id: "a", hostname: "a", password: "p", username: "API" }];
+    const { client } = createClient({ fs: { readFileSync: jest.fn(() => JSON.stringify(creds)) } });
+
+    jest.spyOn(client as any, "getSession").mockResolvedValue("sid");
+    jest.spyOn(client as any, "fetchJoinUsers").mockResolvedValue([{ id: "u7", name: "API" }]);
+    const authenticate = jest.spyOn(client as any, "authenticate").mockResolvedValue(true);
+    jest.spyOn(client as any, "detectGeneration").mockResolvedValue(14);
+    jest.spyOn(client as any, "connectWebSocket").mockResolvedValue(new TestWebSocket("ws://a"));
+    jest.spyOn(client as any, "setupWebSocketHandlers").mockImplementation(() => undefined);
+    jest.spyOn(client as any, "waitForGameSession").mockResolvedValue(undefined);
+
+    await client.chooseFoundryInstance({ item_order: 0 });
+
+    expect(authenticate).toHaveBeenCalledWith(
+      "a",
+      "sid",
+      expect.objectContaining({ userid: "u7", username: "API" })
+    );
+  });
+
   test("connect throws when no credentials", async () => {
     const { client } = createClient({ fs: { readFileSync: jest.fn(() => "[]") } });
     await expect(client.connect()).rejects.toThrow("No credentials found in config file");
@@ -501,8 +634,8 @@ describe("FoundryClient", () => {
 
   test("connect tries credentials until success", async () => {
     const creds = [
-      { _id: "a", hostname: "a", password: "p", userid: "u" },
-      { _id: "b", hostname: "b", password: "p", userid: "u" },
+      { _id: "a", hostname: "a", password: "p", userid: "u", username: "n" },
+      { _id: "b", hostname: "b", password: "p", userid: "u", username: "n" },
     ];
     const { client } = createClient({ fs: { readFileSync: jest.fn(() => JSON.stringify(creds)) } });
 
@@ -532,8 +665,8 @@ describe("FoundryClient", () => {
 
   test("chooseFoundryInstance switches connection", async () => {
     const creds = [
-      { _id: "a", hostname: "a", password: "p", userid: "u" },
-      { _id: "b", hostname: "b", password: "p", userid: "u" },
+      { _id: "a", hostname: "a", password: "p", userid: "u", username: "n" },
+      { _id: "b", hostname: "b", password: "p", userid: "u", username: "n" },
     ];
     const { client } = createClient({ fs: { readFileSync: jest.fn(() => JSON.stringify(creds)) } });
 

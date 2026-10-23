@@ -2,8 +2,9 @@ export interface FoundryCredential {
   _id: string;
   hostname: string;
   password: string;
-  userid: string;
-  /** Foundry username; required by v14 for /join */
+  /** Foundry user document ID; looked up from `username` when omitted */
+  userid?: string;
+  /** Foundry username; looked up from `userid` when omitted. Required by v14 for /join */
   username?: string;
   allow_insecure_tls?: boolean;
 }
@@ -11,7 +12,8 @@ export interface FoundryCredential {
 export interface CredentialInfo {
   _id: string;
   hostname: string;
-  userid: string;
+  userid?: string;
+  username?: string;
   item_order: number;
   currently_active: boolean;
 }
@@ -31,6 +33,16 @@ export function parseCredentials(raw: string): FoundryCredential[] {
     ) {
       throw new Error("allow_insecure_tls must be a boolean");
     }
+
+    const record = (credential ?? {}) as Record<string, unknown>;
+    for (const field of ["userid", "username"]) {
+      if (field in record && typeof record[field] !== "string") {
+        throw new Error(`${field} must be a string`);
+      }
+    }
+    if (!record.userid && !record.username) {
+      throw new Error("Each credential needs a userid or a username");
+    }
   }
 
   return parsed as FoundryCredential[];
@@ -44,6 +56,7 @@ export function getCredentialsInfo(
     _id: cred._id,
     hostname: cred.hostname,
     userid: cred.userid,
+    ...(cred.username ? { username: cred.username } : {}),
     item_order: index,
     currently_active: index === activeIndex,
   }));

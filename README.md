@@ -55,7 +55,7 @@ Create a file at `config/foundry_credentials.json`:
   {
     "_id": "test-world",
     "hostname": "test.foundry-server.com",
-    "userid": "test-user-id",
+    "username": "Gamemaster",
     "password": "test-password"
   }
 ]
@@ -65,6 +65,8 @@ Create a file at `config/foundry_credentials.json`:
 - `_id` - A user-defined identifier for this credential entry (used to switch between instances)
 - `hostname` - The domain/IP of your FoundryVTT server
 - `userid` - Your Foundry user document ID (find by inspecting Users in Foundry admin panel)
+- `username` - Your Foundry user name
+  - Give `userid`, `username`, or both. If only one is given, the other is looked up from the world's user list before logging in. If both are given, they are used as-is. Name lookup is exact first, then case-insensitive.
 - `password` - Your Foundry user password
 - `allow_insecure_tls` - Optional. Set to `true` only for a trusted Foundry server with a self-signed certificate. Defaults to `false`.
 

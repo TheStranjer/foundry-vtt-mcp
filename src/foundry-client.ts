@@ -41,6 +41,13 @@ import {
   parseJoinResponse,
 } from "./core/session.js";
 import { filterWorldData } from "./core/world.js";
+import {
+  type JoinUser,
+  buildJoinDataRequestMessage,
+  hasCompleteUserIdentity,
+  parseJoinDataUsers,
+  resolveUserIdentity,
+} from "./core/user-identity.js";
 
 interface FoundryConnection {
   hostname: string;
@@ -399,6 +406,103 @@ export class FoundryClient {
   }
 
   /**
+   * Fetch the world's users over an unauthenticated socket via `getJoinData`,
+   * the request Foundry's own join screen makes to populate its user picker.
+   */
+  private async fetchJoinUsers(
+    hostname: string,
+    sessionId: string,
+    generation: number | null,
+    allowInsecureTls = false
+  ): Promise<JoinUser[]> {
+    const ws = await this.connectWebSocket(hostname, sessionId, generation, allowInsecureTls);
+    const ackId = this.messageCounter++;
+
+    try {
+      return await new Promise<JoinUser[]>((resolve, reject) => {
+        const timeout = this.setTimeoutFn(() => {
+          ws.off("message", messageHandler);
+          reject(new Error("Timed out waiting for Foundry join data (10s)"));
+        }, 10000);
+
+        const messageHandler = (data: WebSocket.Data) => {
+          const message = data.toString();
+          this.wsLogger.logInbound(message);
+
+          if (isEngineHandshake(message)) {
+            this.sendWebSocketMessage(ws, "40");
+            return;
+          }
+          if (isEnginePing(message)) {
+            this.sendWebSocketMessage(ws, ENGINE_PONG);
+            return;
+          }
+          if (message.startsWith("40")) {
+            this.sendWebSocketMessage(ws, buildJoinDataRequestMessage(ackId));
+            return;
+          }
+          if (ackIdOf(message) !== ackId) {
+            return;
+          }
+
+          this.clearTimeoutFn(timeout);
+          ws.off("message", messageHandler);
+
+          const ack = parseAckMessage(message);
+          try {
+            if (ack.error || !ack.payload) {
+              throw ack.error ?? new Error("Empty join data response");
+            }
+            resolve(parseJoinDataUsers(ack.payload));
+          } catch (error) {
+            reject(error);
+          }
+        };
+
+        ws.on("message", messageHandler);
+      });
+    } finally {
+      ws.close();
+    }
+  }
+
+  /**
+   * Fill in a credential's missing userid or username from the world's user
+   * list. Credentials that already carry both are returned without a lookup.
+   * A failed lookup is logged and the credential is returned as given, so
+   * /join still gets a chance with whatever it carries.
+   */
+  private async completeUserIdentity(
+    hostname: string,
+    sessionId: string,
+    credential: FoundryCredential
+  ): Promise<FoundryCredential> {
+    if (hasCompleteUserIdentity(credential)) {
+      return credential;
+    }
+
+    try {
+      const generation = await this.detectGeneration(hostname, credential.allow_insecure_tls);
+      const users = await this.fetchJoinUsers(
+        hostname,
+        sessionId,
+        generation,
+        credential.allow_insecure_tls
+      );
+      const resolved = resolveUserIdentity(credential, users);
+      this.logger.error(
+        `[FoundryClient] Resolved Foundry user for ${hostname}: ${resolved.username} (${resolved.userid})`
+      );
+      return resolved;
+    } catch (error) {
+      this.logger.error(
+        `[FoundryClient] Could not resolve Foundry user for ${hostname}: ${error}`
+      );
+      return credential;
+    }
+  }
+
+  /**
    * Attempt to reconnect using cached credentials
    */
   private async reconnect(): Promise<void> {
@@ -468,7 +572,7 @@ export class FoundryClient {
     }
 
     for (let i = 0; i < this.credentials.length; i++) {
-      const credential = this.credentials[i];
+      let credential = this.credentials[i];
       const hostname = credential.hostname;
       this.logger.error(`[FoundryClient] Trying to connect to ${hostname}...`);
 
@@ -479,6 +583,10 @@ export class FoundryClient {
           credential.allow_insecure_tls
         );
         this.logger.error(`[FoundryClient] Got session ID: ${sessionId}`);
+
+        // Step 1b: Fill in a missing userid or username from the world's users
+        credential = await this.completeUserIdentity(hostname, sessionId, credential);
+        this.credentials[i] = credential;
 
         // Step 2: POST /join to authenticate
         const success = await this.authenticate(hostname, sessionId, credential);
@@ -543,7 +651,7 @@ export class FoundryClient {
 
     const targetIndex = resolveCredentialIndex(this.credentials, identifier);
 
-    const credential = this.credentials[targetIndex];
+    let credential = this.credentials[targetIndex];
     const hostname = credential.hostname;
 
     this.logger.error(`[FoundryClient] Connecting to instance: ${credential._id} (${hostname})...`);
@@ -560,6 +668,8 @@ export class FoundryClient {
       hostname,
       credential.allow_insecure_tls
     );
+    credential = await this.completeUserIdentity(hostname, sessionId, credential);
+    this.credentials[targetIndex] = credential;
     const success = await this.authenticate(hostname, sessionId, credential);
 
     if (!success) {

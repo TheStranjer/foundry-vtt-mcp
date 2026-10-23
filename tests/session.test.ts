@@ -45,6 +45,23 @@ describe("session", () => {
     expect(JSON.parse(payload)).toMatchObject({ userId: "user", username: "API" });
   });
 
+  test("buildJoinPayload sends a resolved username-only credential", () => {
+    const payload = buildJoinPayload({
+      _id: "c1",
+      hostname: "h",
+      password: "pw",
+      username: "API",
+      userid: "resolved",
+    });
+    expect(JSON.parse(payload)).toEqual({
+      userid: "resolved",
+      userId: "resolved",
+      username: "API",
+      password: "pw",
+      action: "join",
+    });
+  });
+
   test("parseJoinResponse succeeds on status success", () => {
     const result = parseJoinResponse(200, JSON.stringify({ status: "success", message: "ok" }));
     expect(result).toEqual({ success: true, message: "ok" });

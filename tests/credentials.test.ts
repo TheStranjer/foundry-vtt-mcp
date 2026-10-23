@@ -38,6 +38,31 @@ describe("credentials", () => {
     ]))).toThrow("allow_insecure_tls must be a boolean");
   });
 
+  test("parseCredentials accepts a username without a userid", () => {
+    const raw = [{ _id: "a", hostname: "h", password: "p", username: "API" }];
+    expect(parseCredentials(JSON.stringify(raw))).toEqual(raw);
+  });
+
+  test("parseCredentials rejects a credential with neither userid nor username", () => {
+    expect(() => parseCredentials(JSON.stringify([{ _id: "a", hostname: "h", password: "p" }])))
+      .toThrow("Each credential needs a userid or a username");
+    expect(() => parseCredentials(JSON.stringify([{ _id: "a", hostname: "h", password: "p", userid: "" }])))
+      .toThrow("Each credential needs a userid or a username");
+  });
+
+  test("parseCredentials rejects non-string userid or username", () => {
+    expect(() => parseCredentials(JSON.stringify([{ _id: "a", hostname: "h", password: "p", userid: 5 }])))
+      .toThrow("userid must be a string");
+    expect(() => parseCredentials(JSON.stringify([
+      { _id: "a", hostname: "h", password: "p", userid: "u", username: false },
+    ]))).toThrow("username must be a string");
+  });
+
+  test("getCredentialsInfo includes username when known", () => {
+    const info = getCredentialsInfo([{ ...creds[0], username: "API" }], 0);
+    expect(info[0]).toMatchObject({ userid: "u1", username: "API" });
+  });
+
   test("getCredentialsInfo maps active index", () => {
     const info = getCredentialsInfo(creds, 1);
     expect(info).toEqual([
