@@ -1397,6 +1397,8 @@ export class FoundryClient {
             "Content-Type": `multipart/form-data; boundary=${boundary}`,
             "Content-Length": Buffer.byteLength(formData),
             Cookie: `session=${this.connection!.sessionId}`,
+            // Foundry v14 rejects POSTs without its own Origin (400), as on /join.
+            Origin: `https://${this.connection!.hostname}`,
           },
         },
         (res) => {
