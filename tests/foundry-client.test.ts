@@ -458,11 +458,95 @@ describe("FoundryClient", () => {
       ws,
     };
 
-    const reconnect = jest.spyOn(client as any, "reconnect").mockResolvedValue(undefined);
+    const reconnect = jest.spyOn(client as any, "reconnect").mockResolvedValue(true);
     (client as any).setupWebSocketHandlers(ws);
+    ws.readyState = 3; // a real socket is CLOSED when "close" fires
     ws.emit("close", 1000, Buffer.from("bye"));
 
     expect(reconnect).toHaveBeenCalled();
+  });
+
+  test("a closed socket that was already replaced does not trigger a reconnect", () => {
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const oldWs = new TestWebSocket("ws://host");
+    const currentWs = new TestWebSocket("ws://host");
+    (client as any).connection = { hostname: "host", credential: {}, sessionId: "sid", ws: currentWs };
+    const reconnect = jest.spyOn(client as any, "reconnect").mockResolvedValue(true);
+
+    (client as any).setupWebSocketHandlers(oldWs);
+    oldWs.emit("close", 1006, Buffer.from(""));
+    expect(reconnect).not.toHaveBeenCalled();
+  });
+
+  test("reconnection keeps retrying with backoff until it succeeds", async () => {
+    const timers: Array<{ fn: () => void; ms: number }> = [];
+    const { client } = createClient({
+      WebSocketCtor: TestWebSocket,
+      setTimeoutFn: ((fn: () => void, ms: number) => { timers.push({ fn, ms }); return 0; }) as any,
+    });
+    const ws = new TestWebSocket("ws://host");
+    ws.readyState = 3;
+    const connection = { hostname: "host", credential: {}, sessionId: "sid", ws };
+    (client as any).connection = connection;
+    const reconnect = jest.spyOn(client as any, "reconnect")
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockImplementationOnce(async () => { ws.readyState = TestWebSocket.OPEN; return true; });
+
+    await (client as any).reconnectWithRetry(connection);
+    expect(timers.map((t) => t.ms)).toEqual([1000]);
+    timers.shift()!.fn(); await Promise.resolve(); await Promise.resolve();
+    expect(timers.map((t) => t.ms)).toEqual([2000]);
+    timers.shift()!.fn(); await Promise.resolve(); await Promise.resolve();
+    expect(reconnect).toHaveBeenCalledTimes(3);
+    expect(timers).toEqual([]);
+  });
+
+  test("reconnection stops retrying when the connection is replaced", async () => {
+    const timers: Array<() => void> = [];
+    const { client } = createClient({
+      WebSocketCtor: TestWebSocket,
+      setTimeoutFn: ((fn: () => void) => { timers.push(fn); return 0; }) as any,
+    });
+    const ws = new TestWebSocket("ws://host");
+    ws.readyState = 3;
+    const connection = { hostname: "host", credential: {}, sessionId: "sid", ws };
+    (client as any).connection = connection;
+    const reconnect = jest.spyOn(client as any, "reconnect").mockResolvedValue(false);
+
+    await (client as any).reconnectWithRetry(connection);
+    (client as any).connection = { ...connection, ws: new TestWebSocket("ws://other") };
+    timers.shift()!();
+    await Promise.resolve();
+    expect(reconnect).toHaveBeenCalledTimes(1);
+  });
+
+  test("reconnect falls back to a fresh session when the old one gets a null game session", async () => {
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+    (client as any).connection = { hostname: "host", credential: {}, sessionId: "stale", ws };
+    jest.spyOn(client as any, "authenticate").mockResolvedValue(true);
+    const getSession = jest.spyOn(client as any, "getSession").mockResolvedValue("fresh");
+    const connectWebSocket = jest.spyOn(client as any, "connectWebSocket").mockResolvedValue(new TestWebSocket("ws://host"));
+    jest.spyOn(client as any, "waitForGameSession")
+      .mockRejectedValueOnce(new Error("Foundry returned a null session"))
+      .mockResolvedValueOnce(undefined);
+
+    await expect((client as any).reconnect()).resolves.toBe(true);
+    expect(getSession).toHaveBeenCalled();
+    expect(connectWebSocket.mock.calls.map((c) => c[1])).toEqual(["stale", "fresh"]);
+    expect((client as any).connection.sessionId).toBe("fresh");
+  });
+
+  test("ensureConnected tries one reconnection when disconnected", async () => {
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    expect(await client.ensureConnected()).toBe(false);
+
+    const ws = new TestWebSocket("ws://host");
+    ws.readyState = 3;
+    (client as any).connection = { hostname: "host", credential: {}, sessionId: "sid", ws };
+    jest.spyOn(client as any, "reconnect").mockImplementation(async () => { ws.readyState = TestWebSocket.OPEN; return true; });
+    expect(await client.ensureConnected()).toBe(true);
   });
 
   test("reconnect handles success and fallbacks", async () => {

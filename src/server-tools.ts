@@ -396,7 +396,11 @@ export function createToolHandler(foundryClient: FoundryClient) {
 
     const connectionlessTools = ["show_credentials", "choose_foundry_instance"];
 
-    if (!connectionlessTools.includes(name) && !foundryClient.isConnected()) {
+    if (
+      !connectionlessTools.includes(name) &&
+      !foundryClient.isConnected() &&
+      !(await foundryClient.ensureConnected())
+    ) {
       return errorResponse("Error: Not connected to FoundryVTT server");
     }
 
