@@ -119,7 +119,8 @@ export class FoundryClient {
       return parseCredentials(data);
     } catch (error) {
       throw new Error(
-        `Failed to load credentials from ${this.configPath}: ${error}`
+        `Failed to load credentials from ${this.configPath}: ${error}`,
+        { cause: error }
       );
     }
   }
