@@ -19,6 +19,7 @@ import {
   truncateDocuments,
 } from "./core/document-utils.js";
 import { type PackSummary, summarizePacks, validatePackAccess } from "./core/compendium.js";
+import { COLLECTION_DOCUMENT_NAMES, buildIdentifierQuery, whereToServerQuery } from "./core/collections.js";
 import { buildDocumentOperation } from "./core/operations.js";
 import {
   buildModifyDocumentMessage,
@@ -770,6 +771,34 @@ export class FoundryClient {
     });
   }
 
+  /**
+   * Send a modifyDocument "get" and return the response, throwing on a server error.
+   * Shared by world-collection reads (queryWorldDocuments) and compendium reads
+   * (getPackDocuments); each caller interprets the result array as it needs to.
+   */
+  private async sendGetRequest(
+    documentName: string,
+    operation: Record<string, unknown>,
+    timeoutMessage: string,
+    logLabel: string
+  ): Promise<Record<string, unknown>> {
+    const response = await this.sendModifyDocumentRequest(
+      documentName,
+      "get",
+      operation,
+      timeoutMessage,
+      (responseData) => Array.isArray(responseData.result),
+      logLabel
+    );
+
+    if (response.error) {
+      const error = response.error as { message?: unknown };
+      throw new Error(typeof error.message === "string" ? error.message : String(response.error));
+    }
+
+    return response;
+  }
+
   /** Valid document collection names in FoundryVTT */
   static readonly DOCUMENT_COLLECTIONS = ["actors", "items", "folders", "users", "scenes", "journal"] as const;
 
@@ -803,12 +832,7 @@ export class FoundryClient {
     const requestedFields = options?.requestedFields ?? null;
     const where = options?.where ?? null;
 
-    const worldData = await this.requestWorldData();
-    const docs = worldData[collection] as Record<string, unknown>[] | undefined;
-
-    if (!docs || !Array.isArray(docs)) {
-      throw new Error(`Response does not contain ${collection} array`);
-    }
+    const docs = await this.queryWorldDocuments(collection, whereToServerQuery(where));
 
     // Apply where filter first
     let filteredDocs = this.filterDocumentsByWhere(docs, where);
@@ -840,12 +864,12 @@ export class FoundryClient {
   ): Promise<Record<string, unknown> | null> {
     const requestedFields = options?.requestedFields ?? null;
 
-    const worldData = await this.requestWorldData();
-    const docs = worldData[collection] as Record<string, unknown>[] | undefined;
-
-    if (!docs || !Array.isArray(docs)) {
-      throw new Error(`Response does not contain ${collection} array`);
+    const query = buildIdentifierQuery(identifier);
+    if (!query) {
+      return null;
     }
+
+    const docs = await this.queryWorldDocuments(collection, query);
 
     // Find the document by id, _id, or name
     let doc: Record<string, unknown> | undefined;
@@ -903,9 +927,8 @@ export class FoundryClient {
       throw new Error(packError);
     }
 
-    const response = await this.sendModifyDocumentRequest(
+    const response = await this.sendGetRequest(
       documentName,
-      "get",
       {
         action: "get",
         pack,
@@ -914,14 +937,8 @@ export class FoundryClient {
         broadcast: false,
       },
       `Timeout waiting for compendium read response (30s) for ${pack}`,
-      (responseData) => Array.isArray(responseData.result),
       "getPackDocuments"
     );
-
-    if (response.error) {
-      const error = response.error as { message?: unknown };
-      throw new Error(typeof error.message === "string" ? error.message : String(response.error));
-    }
 
     const docs = (response.result as Record<string, unknown>[] | undefined) ?? [];
     let filteredDocs = this.filterDocumentsByWhere(docs, options?.where ?? null);
@@ -930,6 +947,39 @@ export class FoundryClient {
     );
 
     return truncateDocuments(filteredDocs, options?.maxLength ?? 0);
+  }
+
+  /**
+   * Read the documents of one world collection with a modifyDocument "get", so the server
+   * sends only that document type (filtered by `query`) instead of the whole world payload.
+   * Collections without a known document class fall back to the world payload.
+   */
+  private async queryWorldDocuments(
+    collection: string,
+    query: Record<string, unknown>
+  ): Promise<Record<string, unknown>[]> {
+    const documentName = COLLECTION_DOCUMENT_NAMES[collection];
+    if (!documentName) {
+      const worldData = await this.requestWorldData();
+      const docs = worldData[collection] as Record<string, unknown>[] | undefined;
+      if (!docs || !Array.isArray(docs)) {
+        throw new Error(`Response does not contain ${collection} array`);
+      }
+      return docs;
+    }
+
+    const response = await this.sendGetRequest(
+      documentName,
+      { action: "get", query, index: false, broadcast: false },
+      `Timeout waiting for ${collection} read response (30s)`,
+      "getWorldDocuments"
+    );
+
+    if (!Array.isArray(response.result)) {
+      throw new Error(`Response does not contain ${collection} array`);
+    }
+
+    return response.result as Record<string, unknown>[];
   }
 
   /**
@@ -942,9 +992,7 @@ export class FoundryClient {
     identifier: { id?: string; _id?: string; name?: string },
     options?: { requestedFields?: string[] | null }
   ): Promise<Record<string, unknown> | null> {
-    const docId = identifier._id ?? identifier.id;
-    const query = docId ? { _id: docId } : identifier.name ? { name: identifier.name } : null;
-
+    const query = buildIdentifierQuery(identifier);
     if (!query) {
       return null;
     }
