@@ -18,6 +18,7 @@ import {
   filterDocumentsByWhere,
   truncateDocuments,
 } from "./core/document-utils.js";
+import { type PackSummary, summarizePacks, validatePackAccess } from "./core/compendium.js";
 import { buildDocumentOperation } from "./core/operations.js";
 import {
   buildModifyDocumentMessage,
@@ -690,7 +691,7 @@ export class FoundryClient {
 
   private async sendModifyDocumentRequest(
     type: string,
-    action: "update" | "create" | "delete",
+    action: "get" | "update" | "create" | "delete",
     operation: Record<string, unknown>,
     timeoutMessage: string,
     isMatch: (responseData: Record<string, unknown>) => boolean,
@@ -856,6 +857,97 @@ export class FoundryClient {
 
     // Filter fields
     return filterDocumentFields(doc, requestedFields);
+  }
+
+  /**
+   * List the compendium packs known to the world.
+   * @param options.type - Optional document type to filter by (e.g. "Item", "Actor")
+   * @returns Pack summaries (id, label, type, package)
+   */
+  async getCompendiums(options?: { type?: string | null }): Promise<PackSummary[]> {
+    const worldData = await this.requestWorldData();
+    return summarizePacks(worldData.packs, options?.type ?? null);
+  }
+
+  /**
+   * Read documents out of a compendium pack. Uses the same modifyDocument socket message
+   * as create/modify/delete, with action "get" and the pack in the operation.
+   * @param documentName - The document type the pack holds (Actor, Item, JournalEntry, ...)
+   * @param pack - The compendium pack ID (e.g. "world.my-items", "my-module.items")
+   * @param options.query - Foundry query object; an empty query returns the whole pack
+   * @param options.maxLength - Maximum bytes for the JSON response; documents removed until under limit
+   * @param options.requestedFields - Array of field names to include (always includes _id and name)
+   * @param options.where - Filter documents by field values (AND logic for all conditions)
+   * @returns Array of document objects
+   */
+  async getPackDocuments(
+    documentName: string,
+    pack: string,
+    options?: {
+      query?: Record<string, unknown>;
+      maxLength?: number | null;
+      requestedFields?: string[] | null;
+      where?: Record<string, unknown> | null;
+    }
+  ): Promise<Record<string, unknown>[]> {
+    const worldData = await this.requestWorldData();
+    const packError = validatePackAccess(worldData.packs, pack, documentName);
+    if (packError) {
+      throw new Error(packError);
+    }
+
+    const response = await this.sendModifyDocumentRequest(
+      documentName,
+      "get",
+      {
+        action: "get",
+        pack,
+        query: options?.query ?? {},
+        index: false,
+        broadcast: false,
+      },
+      `Timeout waiting for compendium read response (30s) for ${pack}`,
+      (responseData) => Array.isArray(responseData.result),
+      "getPackDocuments"
+    );
+
+    if (response.error) {
+      const error = response.error as { message?: unknown };
+      throw new Error(typeof error.message === "string" ? error.message : String(response.error));
+    }
+
+    const docs = (response.result as Record<string, unknown>[] | undefined) ?? [];
+    let filteredDocs = this.filterDocumentsByWhere(docs, options?.where ?? null);
+    filteredDocs = filteredDocs.map((doc) =>
+      filterDocumentFields(doc, options?.requestedFields ?? null)
+    );
+
+    return truncateDocuments(filteredDocs, options?.maxLength ?? 0);
+  }
+
+  /**
+   * Read one document out of a compendium pack by id, _id, or name
+   * @returns The document object or null if not found
+   */
+  async getPackDocument(
+    documentName: string,
+    pack: string,
+    identifier: { id?: string; _id?: string; name?: string },
+    options?: { requestedFields?: string[] | null }
+  ): Promise<Record<string, unknown> | null> {
+    const docId = identifier._id ?? identifier.id;
+    const query = docId ? { _id: docId } : identifier.name ? { name: identifier.name } : null;
+
+    if (!query) {
+      return null;
+    }
+
+    const docs = await this.getPackDocuments(documentName, pack, {
+      query,
+      requestedFields: options?.requestedFields ?? null,
+    });
+
+    return docs[0] ?? null;
   }
 
   /**

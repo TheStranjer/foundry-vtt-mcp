@@ -148,6 +148,209 @@ describe("server tools", () => {
     expect((response as any).isError).toBe(true);
   });
 
+  describe("compendium reads", () => {
+    test("get tools expose a pack parameter only for document types that can live in a compendium", () => {
+      const tools = createToolDefinitions();
+      const packable = ["actor", "item", "scene", "journal", "macro", "card", "playlist", "table"];
+      const notPackable = ["folder", "user", "combat", "message", "setting"];
+
+      for (const singular of packable) {
+        const config = DOCUMENT_TYPES.find((c) => c.singular === singular)!;
+        expect(tools.find((t) => t.name === `get_${config.plural}`)?.inputSchema.properties).toHaveProperty("pack");
+        expect(tools.find((t) => t.name === `get_${config.singular}`)?.inputSchema.properties).toHaveProperty("pack");
+      }
+
+      for (const singular of notPackable) {
+        const config = DOCUMENT_TYPES.find((c) => c.singular === singular)!;
+        expect(tools.find((t) => t.name === `get_${config.plural}`)?.inputSchema.properties).not.toHaveProperty("pack");
+        expect(tools.find((t) => t.name === `get_${config.singular}`)?.inputSchema.properties).not.toHaveProperty("pack");
+      }
+    });
+
+    test("createToolDefinitions includes get_compendiums", () => {
+      const tool = createToolDefinitions().find((t) => t.name === "get_compendiums");
+      expect(tool).toBeTruthy();
+      expect(tool?.inputSchema.properties).toHaveProperty("type");
+      expect(tool?.inputSchema.required).toEqual([]);
+    });
+
+    test("get_[plural] with pack reads from the compendium", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocuments: jest.fn(),
+        getPackDocuments: jest.fn().mockResolvedValue([{ _id: "1" }]),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "get_items",
+          arguments: {
+            pack: "my-module.items",
+            max_length: 5,
+            requested_fields: ["name"],
+            where: { type: "consumable" },
+          },
+        },
+      });
+
+      expect(client.getDocuments).not.toHaveBeenCalled();
+      expect(client.getPackDocuments).toHaveBeenCalledWith("Item", "my-module.items", {
+        maxLength: 5,
+        requestedFields: ["name"],
+        where: { type: "consumable" },
+      });
+      expect((response as any).isError).toBeUndefined();
+      expect(JSON.parse(response.content[0].text)).toEqual([{ _id: "1" }]);
+    });
+
+    test("get_[plural] without pack still reads the world", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocuments: jest.fn().mockResolvedValue([]),
+        getPackDocuments: jest.fn(),
+      } as any;
+
+      const handler = createToolHandler(client);
+      await handler({ params: { name: "get_items", arguments: {} } });
+
+      expect(client.getDocuments).toHaveBeenCalled();
+      expect(client.getPackDocuments).not.toHaveBeenCalled();
+    });
+
+    test("get_[plural] with pack maps journals to JournalEntry", async () => {
+      const client = {
+        isConnected: () => true,
+        getPackDocuments: jest.fn().mockResolvedValue([]),
+      } as any;
+
+      const handler = createToolHandler(client);
+      await handler({ params: { name: "get_journals", arguments: { pack: "w.notes" } } });
+
+      expect(client.getPackDocuments).toHaveBeenCalledWith("JournalEntry", "w.notes", expect.any(Object));
+    });
+
+    test("get_[plural] with pack rejects types that cannot be in a compendium", async () => {
+      const client = { isConnected: () => true, getPackDocuments: jest.fn() } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "get_folders", arguments: { pack: "w.x" } } });
+
+      expect((response as any).isError).toBe(true);
+      expect(response.content[0].text).toContain("cannot be stored in a compendium");
+      expect(client.getPackDocuments).not.toHaveBeenCalled();
+    });
+
+    test("get_[plural] with pack returns error on failure", async () => {
+      const client = {
+        isConnected: () => true,
+        getPackDocuments: jest.fn().mockRejectedValue(new Error('Compendium pack "w.x" not found')),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "get_items", arguments: { pack: "w.x" } } });
+
+      expect((response as any).isError).toBe(true);
+      expect(response.content[0].text).toContain("not found");
+    });
+
+    test("get_[singular] with pack reads one document from the compendium", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocument: jest.fn(),
+        getPackDocument: jest.fn().mockResolvedValue({ _id: "1", name: "Rune" }),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "get_item",
+          arguments: { pack: "my-module.items", _id: "1", requested_fields: ["system.price"] },
+        },
+      });
+
+      expect(client.getDocument).not.toHaveBeenCalled();
+      expect(client.getPackDocument).toHaveBeenCalledWith(
+        "Item",
+        "my-module.items",
+        { id: undefined, _id: "1", name: undefined },
+        { requestedFields: ["system.price"] }
+      );
+      expect(JSON.parse(response.content[0].text)).toEqual({ _id: "1", name: "Rune" });
+    });
+
+    test("get_[singular] with pack returns not found", async () => {
+      const client = {
+        isConnected: () => true,
+        getPackDocument: jest.fn().mockResolvedValue(null),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "get_item", arguments: { pack: "w.items", name: "Missing" } },
+      });
+
+      expect((response as any).isError).toBeUndefined();
+      expect(response.content[0].text).toContain("not found");
+    });
+
+    test("get_[singular] with pack still requires an identifier", async () => {
+      const client = { isConnected: () => true, getPackDocument: jest.fn() } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "get_item", arguments: { pack: "w.items" } } });
+
+      expect((response as any).isError).toBe(true);
+      expect(client.getPackDocument).not.toHaveBeenCalled();
+    });
+
+    test("get_[singular] with pack rejects types that cannot be in a compendium", async () => {
+      const client = { isConnected: () => true, getPackDocument: jest.fn() } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "get_user", arguments: { pack: "w.x", name: "Gamemaster" } },
+      });
+
+      expect((response as any).isError).toBe(true);
+      expect(client.getPackDocument).not.toHaveBeenCalled();
+    });
+
+    test("get_compendiums lists packs", async () => {
+      const client = {
+        isConnected: () => true,
+        getCompendiums: jest.fn().mockResolvedValue([{ id: "w.items", label: "Items", type: "Item" }]),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "get_compendiums", arguments: { type: "Item" } } });
+
+      expect(client.getCompendiums).toHaveBeenCalledWith({ type: "Item" });
+      expect(JSON.parse(response.content[0].text)).toEqual([{ id: "w.items", label: "Items", type: "Item" }]);
+    });
+
+    test("get_compendiums without a type lists everything", async () => {
+      const client = { isConnected: () => true, getCompendiums: jest.fn().mockResolvedValue([]) } as any;
+
+      const handler = createToolHandler(client);
+      await handler({ params: { name: "get_compendiums" } });
+
+      expect(client.getCompendiums).toHaveBeenCalledWith({ type: null });
+    });
+
+    test("get_compendiums returns error on failure", async () => {
+      const client = {
+        isConnected: () => true,
+        getCompendiums: jest.fn().mockRejectedValue(new Error("nope")),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "get_compendiums" } });
+
+      expect((response as any).isError).toBe(true);
+    });
+  });
+
   test("get_world returns world", async () => {
     const client = {
       isConnected: () => true,
