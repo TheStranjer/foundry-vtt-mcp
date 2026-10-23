@@ -26,6 +26,7 @@ import {
   isEngineHandshake,
   isEnginePing,
   isSessionEvent,
+  ackIdOf,
   parseAckMessage,
   parseSessionPayload,
   parseWorldResponseMessage,
@@ -729,6 +730,12 @@ export class FoundryClient {
 
         const parsed = parseAckMessage(message);
         if (!parsed.matched) {
+          return;
+        }
+
+        // Another request's answer (same document type, sent concurrently).
+        const respondedAckId = ackIdOf(message);
+        if (respondedAckId !== null && respondedAckId !== ackId) {
           return;
         }
 
@@ -1458,6 +1465,12 @@ export class FoundryClient {
           return;
         }
 
+        // Another request's answer (same document type, sent concurrently).
+        const respondedAckId = ackIdOf(message);
+        if (respondedAckId !== null && respondedAckId !== ackId) {
+          return;
+        }
+
         if (parsed.error || !parsed.payload) {
           return;
         }
@@ -1555,6 +1568,12 @@ export class FoundryClient {
           return;
         }
 
+        // Another request's answer (same document type, sent concurrently).
+        const respondedAckId = ackIdOf(message);
+        if (respondedAckId !== null && respondedAckId !== ackId) {
+          return;
+        }
+
         if (parsed.error || !parsed.payload) {
           return;
         }
@@ -1617,6 +1636,12 @@ export class FoundryClient {
 
         const parsed = parseAckMessage(message);
         if (!parsed.matched) {
+          return;
+        }
+
+        // Another request's answer (same document type, sent concurrently).
+        const respondedAckId = ackIdOf(message);
+        if (respondedAckId !== null && respondedAckId !== ackId) {
           return;
         }
 

@@ -974,6 +974,31 @@ describe("FoundryClient", () => {
     jest.useRealTimers();
   });
 
+  test("concurrent requests of the same type each get their own response by ack id", async () => {
+    jest.useFakeTimers();
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+    (client as any).connection = {
+      hostname: "host",
+      credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+      sessionId: "sid",
+      ws,
+    };
+    (client as any).messageCounter = 7;
+    const isGet = (data: Record<string, unknown>) => Array.isArray(data.result);
+
+    const first = (client as any).sendModifyDocumentRequest("Item", "get", { query: { name: "A" } }, "t", isGet, "a");
+    const second = (client as any).sendModifyDocumentRequest("Item", "get", { query: { name: "B" } }, "t", isGet, "b");
+
+    // Foundry answers the second request first.
+    ws.emit("message", "438" + JSON.stringify([{ type: "Item", result: [{ name: "B" }] }]));
+    ws.emit("message", "437" + JSON.stringify([{ type: "Item", result: [{ name: "A" }] }]));
+
+    await expect(first).resolves.toEqual({ type: "Item", result: [{ name: "A" }] });
+    await expect(second).resolves.toEqual({ type: "Item", result: [{ name: "B" }] });
+    jest.useRealTimers();
+  });
+
   test("sendModifyDocumentRequest ignores mismatched type and handles error payload", async () => {
     jest.useFakeTimers();
     const { client } = createClient({ WebSocketCtor: TestWebSocket });

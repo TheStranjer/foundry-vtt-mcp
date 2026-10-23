@@ -5,6 +5,7 @@ import {
   isEngineHandshake,
   isEnginePing,
   isSessionEvent,
+  ackIdOf,
   parseAckMessage,
   parseSessionPayload,
   parseWorldResponseMessage,
@@ -90,6 +91,13 @@ describe("socket protocol", () => {
     const parsed = parseWorldResponseMessage("430not-json");
     expect(parsed.matched).toBe(true);
     expect(parsed.error?.message).toContain("Failed to parse world response");
+  });
+
+  test("ackIdOf reads the ack id, or null without one", () => {
+    expect(ackIdOf("4312[{}]")).toBe(12);
+    expect(ackIdOf("43[{}]")).toBeNull();
+    expect(ackIdOf("4212[{}]")).toBeNull();
+    expect(ackIdOf("43")).toBeNull();
   });
 
   test("parseAckMessage ignores non-ack", () => {
