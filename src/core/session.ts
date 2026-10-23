@@ -25,6 +25,8 @@ export function extractSessionIdFromCookies(cookies: string[] | undefined): stri
 export function buildJoinPayload(credential: FoundryCredential): string {
   return JSON.stringify({
     userid: credential.userid,
+    userId: credential.userid,
+    ...(credential.username ? { username: credential.username } : {}),
     password: credential.password,
     action: "join",
   });
