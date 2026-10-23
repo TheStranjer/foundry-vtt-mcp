@@ -67,6 +67,9 @@ interface SlimModule {
   version?: unknown;
 }
 
+/** Waits between reconnection attempts; the last one repeats until the client is back. */
+const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000, 30000, 60000];
+
 export class FoundryClient {
   private connection: FoundryConnection | null = null;
   private reconnecting = false;
@@ -325,8 +328,9 @@ export class FoundryClient {
       this.logger.error(
         `[FoundryClient] WebSocket closed: ${code} - ${reason.toString()}`
       );
-      if (!this.reconnecting && this.connection) {
-        this.reconnect();
+      // Only the current socket matters: an old one replaced by a reconnect may close later.
+      if (!this.reconnecting && this.connection && this.connection.ws === ws) {
+        void this.reconnectWithRetry(this.connection);
       }
     });
 
@@ -504,10 +508,34 @@ export class FoundryClient {
   }
 
   /**
-   * Attempt to reconnect using cached credentials
+   * Keep trying to reconnect after the socket closes. A single immediate attempt fails when
+   * Foundry itself is restarting (it is still down a few ms after the close), and the client
+   * then stayed disconnected for good. Retries back off to once a minute and stop once
+   * connected, or when the connection is replaced (choose_foundry_instance).
    */
-  private async reconnect(): Promise<void> {
-    if (!this.connection || this.reconnecting) return;
+  private async reconnectWithRetry(connection: FoundryConnection, attempt = 0): Promise<void> {
+    if (this.connection !== connection || this.isConnected()) return;
+    if (await this.reconnect()) return;
+    if (this.connection !== connection || this.isConnected()) return;
+    const delay = RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)];
+    this.logger.error(`[FoundryClient] Retrying reconnection in ${delay / 1000}s`);
+    this.setTimeoutFn(() => void this.reconnectWithRetry(connection, attempt + 1), delay);
+  }
+
+  /**
+   * True if connected, after one reconnection attempt if needed. Lets a tool call that arrives
+   * while disconnected (e.g. right after Foundry came back) reconnect instead of failing.
+   */
+  async ensureConnected(): Promise<boolean> {
+    if (this.isConnected()) return true;
+    if (!this.connection) return false;
+    await this.reconnect();
+    return this.isConnected();
+  }
+
+  /** One reconnection attempt. True when the client is connected again. */
+  private async reconnect(): Promise<boolean> {
+    if (!this.connection || this.reconnecting) return false;
 
     this.reconnecting = true;
     const { hostname, credential, sessionId, generation } = this.connection;
@@ -515,51 +543,59 @@ export class FoundryClient {
     this.logger.error("[FoundryClient] Attempting to reconnect...");
 
     try {
-      // Try to re-authenticate first
-      const success = await this.authenticate(hostname, sessionId, credential);
-      if (success) {
-        const ws = await this.connectWebSocket(
-          hostname,
-          sessionId,
-          generation,
-          credential.allow_insecure_tls
-        );
-        this.setupWebSocketHandlers(ws);
-        await this.waitForGameSession(ws);
-        this.connection.ws = ws;
-        this.logger.error("[FoundryClient] Reconnection successful");
-      } else {
-        // Session may have expired, try full reconnect with new session
-        const newSessionId = await this.getSession(
-          hostname,
-          credential.allow_insecure_tls
-        );
-        const newSuccess = await this.authenticate(
-          hostname,
-          newSessionId,
-          credential
-        );
-        if (newSuccess) {
+      // Try the current session first. After Foundry restarts it no longer knows that session:
+      // /join still "succeeds" (Foundry starts another session, under a cookie this client never
+      // reads), but the socket opened with the old cookie gets a null session. So if this path
+      // does not end with a bound socket, fall through to a fresh session.
+      try {
+        if (await this.authenticate(hostname, sessionId, credential)) {
           const ws = await this.connectWebSocket(
             hostname,
-            newSessionId,
+            sessionId,
             generation,
             credential.allow_insecure_tls
           );
           this.setupWebSocketHandlers(ws);
           await this.waitForGameSession(ws);
-          this.connection.sessionId = newSessionId;
           this.connection.ws = ws;
-          this.logger.error("[FoundryClient] Reconnection with new session successful");
-        } else {
-          this.logger.error("[FoundryClient] Reconnection failed - authentication failed");
+          this.logger.error("[FoundryClient] Reconnection successful");
+          return true;
         }
+      } catch (error) {
+        this.logger.error(`[FoundryClient] Reconnection with the current session failed: ${error}`);
       }
+
+      // Session may have expired, try full reconnect with new session
+      const newSessionId = await this.getSession(
+        hostname,
+        credential.allow_insecure_tls
+      );
+      const newSuccess = await this.authenticate(
+        hostname,
+        newSessionId,
+        credential
+      );
+      if (newSuccess) {
+        const ws = await this.connectWebSocket(
+          hostname,
+          newSessionId,
+          generation,
+          credential.allow_insecure_tls
+        );
+        this.setupWebSocketHandlers(ws);
+        await this.waitForGameSession(ws);
+        this.connection.sessionId = newSessionId;
+        this.connection.ws = ws;
+        this.logger.error("[FoundryClient] Reconnection with new session successful");
+        return true;
+      }
+      this.logger.error("[FoundryClient] Reconnection failed - authentication failed");
     } catch (error) {
       this.logger.error(`[FoundryClient] Reconnection failed: ${error}`);
     } finally {
       this.reconnecting = false;
     }
+    return false;
   }
 
   /**
