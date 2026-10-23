@@ -771,6 +771,34 @@ export class FoundryClient {
     });
   }
 
+  /**
+   * Send a modifyDocument "get" and return the response, throwing on a server error.
+   * Shared by world-collection reads (queryWorldDocuments) and compendium reads
+   * (getPackDocuments); each caller interprets the result array as it needs to.
+   */
+  private async sendGetRequest(
+    documentName: string,
+    operation: Record<string, unknown>,
+    timeoutMessage: string,
+    logLabel: string
+  ): Promise<Record<string, unknown>> {
+    const response = await this.sendModifyDocumentRequest(
+      documentName,
+      "get",
+      operation,
+      timeoutMessage,
+      (responseData) => Array.isArray(responseData.result),
+      logLabel
+    );
+
+    if (response.error) {
+      const error = response.error as { message?: unknown };
+      throw new Error(typeof error.message === "string" ? error.message : String(response.error));
+    }
+
+    return response;
+  }
+
   /** Valid document collection names in FoundryVTT */
   static readonly DOCUMENT_COLLECTIONS = ["actors", "items", "folders", "users", "scenes", "journal"] as const;
 
@@ -899,9 +927,8 @@ export class FoundryClient {
       throw new Error(packError);
     }
 
-    const response = await this.sendModifyDocumentRequest(
+    const response = await this.sendGetRequest(
       documentName,
-      "get",
       {
         action: "get",
         pack,
@@ -910,14 +937,8 @@ export class FoundryClient {
         broadcast: false,
       },
       `Timeout waiting for compendium read response (30s) for ${pack}`,
-      (responseData) => Array.isArray(responseData.result),
       "getPackDocuments"
     );
-
-    if (response.error) {
-      const error = response.error as { message?: unknown };
-      throw new Error(typeof error.message === "string" ? error.message : String(response.error));
-    }
 
     const docs = (response.result as Record<string, unknown>[] | undefined) ?? [];
     let filteredDocs = this.filterDocumentsByWhere(docs, options?.where ?? null);
@@ -947,19 +968,12 @@ export class FoundryClient {
       return docs;
     }
 
-    const response = await this.sendModifyDocumentRequest(
+    const response = await this.sendGetRequest(
       documentName,
-      "get",
       { action: "get", query, index: false, broadcast: false },
       `Timeout waiting for ${collection} read response (30s)`,
-      (responseData) => Array.isArray(responseData.result),
       "getWorldDocuments"
     );
-
-    if (response.error) {
-      const error = response.error as { message?: unknown };
-      throw new Error(typeof error.message === "string" ? error.message : String(response.error));
-    }
 
     if (!Array.isArray(response.result)) {
       throw new Error(`Response does not contain ${collection} array`);
@@ -978,9 +992,7 @@ export class FoundryClient {
     identifier: { id?: string; _id?: string; name?: string },
     options?: { requestedFields?: string[] | null }
   ): Promise<Record<string, unknown> | null> {
-    const docId = identifier._id ?? identifier.id;
-    const query = docId ? { _id: docId } : identifier.name ? { name: identifier.name } : null;
-
+    const query = buildIdentifierQuery(identifier);
     if (!query) {
       return null;
     }
