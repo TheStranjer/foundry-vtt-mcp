@@ -1377,6 +1377,46 @@ describe("FoundryClient", () => {
       );
     });
 
+    test("sends the connected host as Origin, which Foundry v14 requires", async () => {
+      const https = createHttpsStub((_req, callback) => {
+        const res = new EventEmitter() as any;
+        res.statusCode = 200;
+        callback(res);
+        res.emit("data", JSON.stringify({ path: "worlds/test/assets/test.png" }));
+        res.emit("end");
+      });
+
+      const { client } = createClient({ WebSocketCtor: TestWebSocket, https });
+
+      (client as any).connection = {
+        hostname: "foundry.example.com",
+        credential: {
+          _id: "c",
+          hostname: "foundry.example.com",
+          password: "p",
+          userid: "u",
+        } as FoundryCredential,
+        sessionId: "sid",
+        ws: new TestWebSocket("ws://host"),
+      };
+
+      await client.uploadFile({
+        target: "worlds/test/assets",
+        filename: "test.png",
+        image_data: "aGVsbG8=", // "hello" in base64
+      });
+
+      expect(https.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          path: "/upload",
+          headers: expect.objectContaining({
+            Origin: "https://foundry.example.com",
+          }),
+        }),
+        expect.any(Function)
+      );
+    });
+
     test("handles upload error response", async () => {
       const https = createHttpsStub((_req, callback) => {
         const res = new EventEmitter() as any;
