@@ -70,9 +70,14 @@ interface SlimModule {
 /** Waits between reconnection attempts; the last one repeats until the client is back. */
 const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000, 30000, 60000];
 
+/** Silence allowed on an HTTP request. A server can accept it and then never answer. */
+const REQUEST_TIMEOUT_MS = 10000;
+
 export class FoundryClient {
   private connection: FoundryConnection | null = null;
-  private reconnecting = false;
+  /** The attempt in progress; everyone who needs a reconnection waits on the same one. */
+  private reconnectAttempt: Promise<boolean> | null = null;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private configPath: string;
   private messageCounter = 1;
   private credentials: FoundryCredential[] = [];
@@ -135,6 +140,13 @@ export class FoundryClient {
     return this.crypto.randomBytes(12).toString("hex");
   }
 
+  /** Fail a request that goes silent, which surfaces through its "error" event. */
+  private failOnTimeout(req: http.ClientRequest): void {
+    req.on("timeout", () => {
+      req.destroy(new Error(`no response for ${REQUEST_TIMEOUT_MS / 1000}s`));
+    });
+  }
+
   /**
    * Detect the Foundry major generation via the public `GET /api/status`
    * endpoint. This tells us how to bind the socket session on the WebSocket
@@ -153,6 +165,7 @@ export class FoundryClient {
           port: 443,
           path: "/api/status",
           method: "GET",
+          timeout: REQUEST_TIMEOUT_MS,
           ...(allowInsecureTls && { rejectUnauthorized: false }),
         },
         (res) => {
@@ -167,9 +180,11 @@ export class FoundryClient {
             );
             resolve(generation);
           });
+          res.on("error", () => resolve(null));
         }
       );
 
+      this.failOnTimeout(req);
       req.on("error", (error) => {
         this.logger.error(
           `[FoundryClient] Could not detect Foundry version for ${hostname}: ${error.message}`
@@ -195,6 +210,7 @@ export class FoundryClient {
           port: 443,
           path: "/join",
           method: "GET",
+          timeout: REQUEST_TIMEOUT_MS,
           ...(allowInsecureTls && { rejectUnauthorized: false }),
         },
         (res) => {
@@ -203,6 +219,7 @@ export class FoundryClient {
         }
       );
 
+      this.failOnTimeout(req);
       req.on("error", (error) => {
         reject(new Error(`GET /join failed for ${hostname}: ${error.message}`));
       });
@@ -228,6 +245,7 @@ export class FoundryClient {
           port: 443,
           path: "/join",
           method: "POST",
+          timeout: REQUEST_TIMEOUT_MS,
           ...(credential.allow_insecure_tls && { rejectUnauthorized: false }),
           headers: {
             "Content-Type": "application/json",
@@ -256,9 +274,13 @@ export class FoundryClient {
             );
             resolve(false);
           });
+          res.on("error", (error) => {
+            reject(new Error(`POST /join failed for ${hostname}: ${error.message}`));
+          });
         }
       );
 
+      this.failOnTimeout(req);
       req.on("error", (error) => {
         reject(
           new Error(`POST /join failed for ${hostname}: ${error.message}`)
@@ -329,7 +351,7 @@ export class FoundryClient {
         `[FoundryClient] WebSocket closed: ${code} - ${reason.toString()}`
       );
       // Only the current socket matters: an old one replaced by a reconnect may close later.
-      if (!this.reconnecting && this.connection && this.connection.ws === ws) {
+      if (this.connection && this.connection.ws === ws) {
         void this.reconnectWithRetry(this.connection);
       }
     });
@@ -519,7 +541,20 @@ export class FoundryClient {
     if (this.connection !== connection || this.isConnected()) return;
     const delay = RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)];
     this.logger.error(`[FoundryClient] Retrying reconnection in ${delay / 1000}s`);
-    this.setTimeoutFn(() => void this.reconnectWithRetry(connection, attempt + 1), delay);
+    // The connection object outlives its sockets, so a retry from before a brief recovery can
+    // still be pending when this one starts. Only one may stay scheduled.
+    this.cancelRetry();
+    this.retryTimer = this.setTimeoutFn(() => {
+      this.retryTimer = null;
+      void this.reconnectWithRetry(connection, attempt + 1);
+    }, delay);
+  }
+
+  private cancelRetry(): void {
+    if (this.retryTimer !== null) {
+      this.clearTimeoutFn(this.retryTimer);
+      this.retryTimer = null;
+    }
   }
 
   /**
@@ -533,12 +568,19 @@ export class FoundryClient {
     return this.isConnected();
   }
 
-  /** One reconnection attempt. True when the client is connected again. */
-  private async reconnect(): Promise<boolean> {
-    if (!this.connection || this.reconnecting) return false;
+  /** One reconnection attempt, shared by all callers. True when the client is connected again. */
+  private reconnect(): Promise<boolean> {
+    if (!this.connection) return Promise.resolve(false);
 
-    this.reconnecting = true;
-    const { hostname, credential, sessionId, generation } = this.connection;
+    this.reconnectAttempt ??= this.attemptReconnect(this.connection).finally(() => {
+      this.reconnectAttempt = null;
+    });
+    return this.reconnectAttempt;
+  }
+
+  private async attemptReconnect(connection: FoundryConnection): Promise<boolean> {
+    const { hostname, credential, sessionId, generation } = connection;
+    const allowInsecureTls = credential.allow_insecure_tls;
 
     this.logger.error("[FoundryClient] Attempting to reconnect...");
 
@@ -549,53 +591,68 @@ export class FoundryClient {
       // does not end with a bound socket, fall through to a fresh session.
       try {
         if (await this.authenticate(hostname, sessionId, credential)) {
-          const ws = await this.connectWebSocket(
-            hostname,
-            sessionId,
-            generation,
-            credential.allow_insecure_tls
-          );
-          this.setupWebSocketHandlers(ws);
-          await this.waitForGameSession(ws);
-          this.connection.ws = ws;
-          this.logger.error("[FoundryClient] Reconnection successful");
-          return true;
+          const ws = await this.openBoundSocket(hostname, sessionId, generation, allowInsecureTls);
+          return this.adoptSocket(connection, ws, sessionId, generation);
         }
       } catch (error) {
         this.logger.error(`[FoundryClient] Reconnection with the current session failed: ${error}`);
       }
 
-      // Session may have expired, try full reconnect with new session
-      const newSessionId = await this.getSession(
-        hostname,
-        credential.allow_insecure_tls
-      );
-      const newSuccess = await this.authenticate(
-        hostname,
-        newSessionId,
-        credential
-      );
-      if (newSuccess) {
-        const ws = await this.connectWebSocket(
-          hostname,
-          newSessionId,
-          generation,
-          credential.allow_insecure_tls
-        );
-        this.setupWebSocketHandlers(ws);
-        await this.waitForGameSession(ws);
-        this.connection.sessionId = newSessionId;
-        this.connection.ws = ws;
-        this.logger.error("[FoundryClient] Reconnection with new session successful");
-        return true;
+      if (this.connection !== connection) return false;
+
+      // Session may have expired, try full reconnect with new session. A restart may also have
+      // been an upgrade, which changes how the socket binds its session.
+      const newGeneration = (await this.detectGeneration(hostname, allowInsecureTls)) ?? generation;
+      const newSessionId = await this.getSession(hostname, allowInsecureTls);
+      if (await this.authenticate(hostname, newSessionId, credential)) {
+        const ws = await this.openBoundSocket(hostname, newSessionId, newGeneration, allowInsecureTls);
+        return this.adoptSocket(connection, ws, newSessionId, newGeneration);
       }
       this.logger.error("[FoundryClient] Reconnection failed - authentication failed");
     } catch (error) {
       this.logger.error(`[FoundryClient] Reconnection failed: ${error}`);
-    } finally {
-      this.reconnecting = false;
     }
     return false;
+  }
+
+  /** A socket bound to the game session. One that fails to bind is closed, not left open. */
+  private async openBoundSocket(
+    hostname: string,
+    sessionId: string,
+    generation: number | null,
+    allowInsecureTls = false
+  ): Promise<WebSocket> {
+    const ws = await this.connectWebSocket(hostname, sessionId, generation, allowInsecureTls);
+    this.setupWebSocketHandlers(ws);
+    try {
+      await this.waitForGameSession(ws);
+    } catch (error) {
+      ws.close();
+      throw error;
+    }
+    return ws;
+  }
+
+  /**
+   * Install a reconnected socket, unless its connection was replaced during the attempt: writing
+   * to the current connection then would point another instance at this server's world.
+   */
+  private adoptSocket(
+    connection: FoundryConnection,
+    ws: WebSocket,
+    sessionId: string,
+    generation: number | null
+  ): boolean {
+    if (this.connection !== connection) {
+      ws.close();
+      return false;
+    }
+
+    connection.ws = ws;
+    connection.sessionId = sessionId;
+    connection.generation = generation;
+    this.logger.error("[FoundryClient] Reconnection successful");
+    return true;
   }
 
   /**
@@ -1874,6 +1931,7 @@ export class FoundryClient {
    * Close the connection
    */
   disconnect(): void {
+    this.cancelRetry();
     if (this.connection) {
       this.connection.ws.close();
       this.connection = null;

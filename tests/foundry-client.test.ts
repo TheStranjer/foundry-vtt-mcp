@@ -526,6 +526,7 @@ describe("FoundryClient", () => {
     const ws = new TestWebSocket("ws://host");
     (client as any).connection = { hostname: "host", credential: {}, sessionId: "stale", ws };
     jest.spyOn(client as any, "authenticate").mockResolvedValue(true);
+    jest.spyOn(client as any, "detectGeneration").mockResolvedValue(null);
     const getSession = jest.spyOn(client as any, "getSession").mockResolvedValue("fresh");
     const connectWebSocket = jest.spyOn(client as any, "connectWebSocket").mockResolvedValue(new TestWebSocket("ws://host"));
     jest.spyOn(client as any, "waitForGameSession")
@@ -563,6 +564,7 @@ describe("FoundryClient", () => {
       .spyOn(client as any, "authenticate")
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true);
+    jest.spyOn(client as any, "detectGeneration").mockResolvedValue(null);
     const getSession = jest
       .spyOn(client as any, "getSession")
       .mockResolvedValue("newSid");
