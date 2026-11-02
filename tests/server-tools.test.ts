@@ -35,14 +35,29 @@ describe("server tools", () => {
     expect(deleteDocument?.inputSchema.properties).toHaveProperty("pack");
   });
 
-  test("handler blocks when not connected", async () => {
+  test("handler blocks when not connected and reconnecting fails", async () => {
     const client = {
       isConnected: () => false,
+      ensureConnected: jest.fn(async () => false),
     } as any;
     const handler = createToolHandler(client);
 
     const response = await handler({ params: { name: "get_actors" } });
     expect((response as any).isError).toBe(true);
+    expect(client.ensureConnected).toHaveBeenCalled();
+  });
+
+  test("handler reconnects on demand before running a tool", async () => {
+    const client = {
+      isConnected: () => false,
+      ensureConnected: jest.fn(async () => true),
+      getDocuments: jest.fn(async () => [{ _id: "1", name: "A" }]),
+    } as any;
+    const handler = createToolHandler(client);
+
+    const response = await handler({ params: { name: "get_actors" } });
+    expect((response as any).isError).toBeUndefined();
+    expect(client.getDocuments).toHaveBeenCalled();
   });
 
   test("get_[plural] returns documents", async () => {
