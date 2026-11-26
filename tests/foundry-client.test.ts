@@ -1200,6 +1200,51 @@ describe("FoundryClient", () => {
     );
   });
 
+  describe("document writes reject on a Foundry error ack", () => {
+    const cases: [string, string, (c: any) => Promise<unknown>][] = [
+      ["update", "modifyDocument", (c) => c.modifyDocument("Actor", "1", [{ name: "x" }])],
+      ["create", "createDocument", (c) => c.createDocument("Actor", [{ name: "x" }])],
+      ["delete", "deleteDocument", (c) => c.deleteDocument("Actor", ["1"])],
+    ];
+
+    test.each(cases)("%s rejects with Foundry's message", async (_action, _label, run) => {
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+      (client as any).messageCounter = 7;
+
+      const promise = run(client);
+      ws.emit(
+        "message",
+        "437" + JSON.stringify([{ type: "Actor", error: { message: "User lacks permission" } }])
+      );
+
+      await expect(promise).rejects.toThrow("User lacks permission");
+    });
+
+    test.each(cases)("%s rejects with stringified non-object error", async (_action, _label, run) => {
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+      (client as any).messageCounter = 7;
+
+      const promise = run(client);
+      ws.emit("message", "437" + JSON.stringify([{ type: "Actor", error: "bad" }]));
+
+      await expect(promise).rejects.toThrow("bad");
+    });
+  });
+
   test("requestWorldData resolves on world message", async () => {
     const { client } = createClient({ WebSocketCtor: TestWebSocket });
     const ws = new TestWebSocket("ws://host");
