@@ -4,6 +4,7 @@ import {
   MAX_LIMIT,
   buildPage,
   buildWhereHint,
+  filterDocumentFields,
   fitToBudget,
   pageDocuments,
   resolvePageParams,
@@ -284,10 +285,9 @@ describe("message order", () => {
   function messageClient() {
     const client = createClient();
     const send = jest.spyOn(client as any, "sendGetRequest").mockImplementation(async (...args: unknown[]) => {
-      const operation = args[1] as { query: { _id?: string } };
-      const result = operation.query._id
-        ? messages.filter((m) => m._id === operation.query._id)
-        : messages.map(({ _id, timestamp }) => ({ _id, timestamp }));
+      const operation = args[1] as { query: { _id?: string }; index?: boolean; indexFields?: string[] };
+      const matching = operation.query._id ? messages.filter((m) => m._id === operation.query._id) : messages;
+      const result = operation.index ? matching.map((m) => filterDocumentFields(m, operation.indexFields ?? null)) : matching;
       return { result };
     });
     return { client, send };
@@ -310,21 +310,102 @@ describe("message order", () => {
     expect(page.next_offset).toBe(3);
   });
 
-  test("fetches _id and timestamp for all, then only the page's fields one by one", async () => {
+  test("a summary page is one indexed request with the sort and page fields", async () => {
     const { client, send } = messageClient();
     const page = await client.getDocuments("messages", { limit: 2 });
 
+    expect(send).toHaveBeenCalledTimes(1);
+    expect((send.mock.calls[0][1] as any)).toMatchObject({
+      index: true,
+      indexFields: ["_id", "name", "timestamp", "speaker.alias", "author"],
+      query: {},
+    });
+    expect(page.documents).toEqual([
+      { _id: "m4", timestamp: 400, speaker: { alias: "D" } },
+      { _id: "m1", timestamp: 300, speaker: { alias: "C" } },
+    ]);
+  });
+
+  test("explicit requested_fields are one indexed request and drop the sort field unless requested", async () => {
+    const { client, send } = messageClient();
+    const page = await client.getDocuments("messages", { requestedFields: ["speaker.alias"], limit: 2 });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect((send.mock.calls[0][1] as any).indexFields).toEqual(["_id", "name", "timestamp", "speaker.alias"]);
+    expect(page.documents).toEqual([
+      { _id: "m4", speaker: { alias: "D" } },
+      { _id: "m1", speaker: { alias: "C" } },
+    ]);
+  });
+
+  test("a summary page makes one request whatever the limit", async () => {
+    const client = createClient();
+    const rows = Array.from({ length: 300 }, (_, i) => ({ _id: `m${i}`, timestamp: i }));
+    const send = jest.spyOn(client as any, "sendGetRequest").mockResolvedValue({ result: rows });
+    for (const limit of [1, 50, 100, 1000]) {
+      send.mockClear();
+      const page = await client.getDocuments("messages", { limit, maxLength: 0 });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(page.returned).toBe(Math.min(limit, 300));
+    }
+  });
+
+  test("summary paging crosses a page boundary in both orders", async () => {
+    const { client } = messageClient();
+    const first = await client.getDocuments("messages", { limit: 3, sort: "oldest" });
+    expect(first.documents.map((m) => m._id)).toEqual(["m2", "m3", "m1"]);
+    expect(first).toMatchObject({ total: 4, offset: 0, returned: 3, next_offset: 3 });
+    const second = await client.getDocuments("messages", { limit: 3, offset: first.next_offset!, sort: "oldest" });
+    expect(second.documents.map((m) => m._id)).toEqual(["m4"]);
+    expect(second).toMatchObject({ total: 4, offset: 3, returned: 1, next_offset: null });
+  });
+
+  test("summary page applies the byte budget locally", async () => {
+    const { client } = messageClient();
+    const full = await client.getDocuments("messages", { maxLength: 0 });
+    const two = bytes(full.documents.slice(0, 2));
+    const page = await client.getDocuments("messages", { maxLength: two });
+    expect(page).toMatchObject({ total: 4, offset: 0, returned: 2, next_offset: 2 });
+  });
+
+  test("envelope matches the generic pager for the same data", async () => {
+    const { client } = messageClient();
+    const page = await client.getDocuments("messages", { limit: 3, offset: 1 });
+    const expected = pageDocuments(
+      [
+        { _id: "m4", timestamp: 400, speaker: { alias: "D" } },
+        { _id: "m1", timestamp: 300, speaker: { alias: "C" } },
+        { _id: "m3", timestamp: 200, speaker: { alias: "B" } },
+        { _id: "m2", timestamp: 100, speaker: { alias: "A" } },
+      ],
+      { limit: 3, offset: 1, maxLength: DEFAULT_MAX_LENGTH }
+    );
+    expect(page).toEqual(expected);
+  });
+
+  test('["*"] reads the index once, then full documents one at a time', async () => {
+    const { client, send } = messageClient();
+    const page = await client.getDocuments("messages", { limit: 2, requestedFields: ["*"] });
     const operations = send.mock.calls.map((call) => call[1] as any);
     expect(operations[0]).toMatchObject({ index: true, indexFields: ["_id", "name", "timestamp"], query: {} });
     expect(operations.slice(1).map((op) => op.query)).toEqual([{ _id: "m4" }, { _id: "m1" }]);
-    expect(operations[1].indexFields).toEqual(["_id", "name", "timestamp", "speaker.alias", "author"]);
-    expect(page.documents[0]).toEqual({ _id: "m4", timestamp: 400, speaker: { alias: "D" } });
+    expect(operations[1].index).toBe(false);
+    expect(page.documents[0]).toEqual(messages[3]);
   });
 
-  test('["*"] fetches the page documents in full', async () => {
-    const { client, send } = messageClient();
-    await client.getDocuments("messages", { limit: 1, requestedFields: ["*"] });
-    expect((send.mock.calls[1][1] as any).index).toBe(false);
+  test('["*"] with a small max_length makes requests bounded by the budget, not the limit', async () => {
+    const client = createClient();
+    const rows = Array.from({ length: 200 }, (_, i) => ({ _id: `m${i}`, timestamp: i, text: "x".repeat(50) }));
+    const send = jest.spyOn(client as any, "sendGetRequest").mockImplementation(async (...args: unknown[]) => {
+      const query = (args[1] as any).query;
+      return { result: query._id ? rows.filter((r) => r._id === query._id) : rows.map(({ _id, timestamp }) => ({ _id, timestamp })) };
+    });
+    const one = bytes(rows[199]); // newest first; same size for ids m100..m199
+    const budget = 2 + one * 3 + 2; // three documents fit, the fourth does not
+    const page = await client.getDocuments("messages", { limit: 100, requestedFields: ["*"], maxLength: budget });
+
+    expect(page).toMatchObject({ total: 200, offset: 0, returned: 3, next_offset: 3 });
+    // one index request, three documents that fit, one that did not
+    expect(send).toHaveBeenCalledTimes(5);
   });
 
   test("where filters before sorting and paging", async () => {

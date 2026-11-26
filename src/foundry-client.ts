@@ -114,10 +114,6 @@ const SOCKET_SETUP_TIMEOUT_MS = 10000;
 /** Silence allowed on a file upload or download, which can pause longer than a small API call. */
 const TRANSFER_TIMEOUT_MS = 60000;
 
-/** Operation fields for a get: Foundry's index returns only `indexFields` when set. */
-/** How many single-document reads a sorted page runs at once. */
-const SORTED_PAGE_CONCURRENCY = 10;
-
 /** Order documents by a (numeric) field, ties and missing values broken by _id so pages are stable. */
 function sortDocuments(
   docs: Record<string, unknown>[],
@@ -133,24 +129,7 @@ function sortDocuments(
   });
 }
 
-/** Map with at most `limit` calls in flight; results keep the input order. */
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<R>
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    while (next < items.length) {
-      const index = next++;
-      results[index] = await fn(items[index]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
-}
-
+/** Operation fields for a get: Foundry's index returns only `indexFields` when set. */
 function indexOperation(indexFields: string[] | null): Record<string, unknown> {
   return indexFields ? { index: true, indexFields } : { index: false };
 }
@@ -1292,9 +1271,15 @@ export class FoundryClient {
 
   /**
    * One page of a collection ordered by `sortField` (Foundry returns documents in _id order).
-   * Fetches only _id and the sort field for every document through the index, sorts, cuts the
-   * page, and then fetches the requested fields for just that page's documents. Foundry's
-   * query matches fields exactly (no $in), so the page's documents are fetched one by one.
+   *
+   * With a field list (summary fields or explicit `requested_fields`), one indexed request
+   * returns the sort field plus the page fields for the whole collection; the page is sorted,
+   * cut and budgeted locally.
+   *
+   * With full documents (`["*"]`) an indexed request returns only _id and the sort field, and
+   * the page's documents are then read one at a time, stopping once the byte budget is full.
+   * Foundry's query matches fields exactly and the code has no evidence of an `$in`-style
+   * operator, so several ids cannot be fetched in one request.
    */
   private async getSortedPage(
     collection: string,
@@ -1304,21 +1289,39 @@ export class FoundryClient {
     where: Record<string, unknown> | null,
     params: PageParams
   ): Promise<DocumentPage> {
-    const order = await this.queryWorldDocuments(
-      collection,
-      whereToServerQuery(where),
-      buildIndexFields([sortField], where)
-    );
-    const sorted = sortDocuments(filterDocumentsByWhere(order, where), sortField, sort === "oldest");
+    const ascending = sort === "oldest";
+    const serverQuery = whereToServerQuery(where);
+
+    if (fields) {
+      const rows = await this.queryWorldDocuments(
+        collection,
+        serverQuery,
+        buildIndexFields([sortField, ...fields], where)
+      );
+      const sorted = sortDocuments(filterDocumentsByWhere(rows, where), sortField, ascending);
+      const documents = sorted
+        .slice(params.offset, params.offset + params.limit)
+        .map((doc) => filterDocumentFields(doc, fields));
+      return buildPage(documents, sorted.length, params.offset, params.maxLength);
+    }
+
+    const order = await this.queryWorldDocuments(collection, serverQuery, buildIndexFields([sortField], where));
+    const sorted = sortDocuments(filterDocumentsByWhere(order, where), sortField, ascending);
     const pageIds = sorted.slice(params.offset, params.offset + params.limit).map((doc) => String(doc._id));
 
-    const fetched = await mapWithConcurrency(pageIds, SORTED_PAGE_CONCURRENCY, async (id) => {
-      const docs = await this.queryWorldDocuments(collection, { _id: id }, buildIndexFields(fields));
-      return docs.find((doc) => doc._id === id) ?? null;
-    });
-    const documents = fetched
-      .filter((doc): doc is Record<string, unknown> => doc !== null)
-      .map((doc) => filterDocumentFields(doc, fields));
+    const documents: Record<string, unknown>[] = [];
+    let used = 2; // "[]"
+    for (const id of pageIds) {
+      const docs = await this.queryWorldDocuments(collection, { _id: id }, null);
+      const doc = docs.find((candidate) => candidate._id === id);
+      if (!doc) continue;
+      documents.push(doc);
+      if (params.maxLength > 0) {
+        used += Buffer.byteLength(JSON.stringify(doc), "utf-8") + (documents.length > 1 ? 1 : 0);
+        // This document did not fit (or is oversized): buildPage drops it, and so would any later one.
+        if (used > params.maxLength) break;
+      }
+    }
 
     return buildPage(documents, sorted.length, params.offset, params.maxLength);
   }
