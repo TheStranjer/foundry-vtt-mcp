@@ -29,6 +29,7 @@ import {
   parseAckMessage,
   parseSessionPayload,
   SOCKET_CONNECT,
+  summarizeFrame,
   type SessionPayload,
 } from "./core/socket-protocol.js";
 import { AckDispatcher } from "./core/ack-dispatcher.js";
@@ -445,7 +446,7 @@ export class FoundryClient {
     ws.on("message", (data) => {
       const message = data.toString();
       this.wsLogger.logInbound(message);
-      this.logger.error(`[FoundryClient] WebSocket message: ${message}`);
+      this.logger.error(`[FoundryClient] ${summarizeFrame("in", message)}`);
 
       if (this.answerEngineFrame(ws, message)) return;
 
@@ -524,7 +525,7 @@ export class FoundryClient {
 
     const send = (event: string, args: unknown[] = []) => {
       const message = buildEmitMessage(id, event, args);
-      this.logger.error(`[FoundryClient] Sending ${label}: ${message}`);
+      this.logger.error(`[FoundryClient] ${summarizeFrame("out", message)}`);
       this.sendWebSocketMessage(ws, message);
     };
 
