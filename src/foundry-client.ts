@@ -13,11 +13,7 @@ import {
   parseCredentials,
   resolveCredentialIndex,
 } from "./core/credentials.js";
-import {
-  filterDocumentFields,
-  filterDocumentsByWhere,
-  truncateDocuments,
-} from "./core/document-utils.js";
+import { pickDocument, shapeDocuments } from "./core/document-utils.js";
 import { type PackSummary, summarizePacks, validatePackAccess } from "./core/compendium.js";
 import { COLLECTION_DOCUMENT_NAMES, buildIdentifierQuery, whereToServerQuery } from "./core/collections.js";
 import { buildDocumentOperation } from "./core/operations.js";
@@ -1134,18 +1130,7 @@ export class FoundryClient {
 
     const docs = await this.queryWorldDocuments(collection, whereToServerQuery(where));
 
-    // Apply where filter first
-    let filteredDocs = filterDocumentsByWhere(docs, where);
-
-    // Filter fields for each document
-    filteredDocs = filteredDocs.map((doc) =>
-      filterDocumentFields(doc, requestedFields)
-    );
-
-    // Truncate if needed
-    filteredDocs = truncateDocuments(filteredDocs, maxLength);
-
-    return filteredDocs;
+    return shapeDocuments(docs, { where, requestedFields, maxLength });
   }
 
   /**
@@ -1162,32 +1147,13 @@ export class FoundryClient {
       requestedFields?: string[] | null;
     }
   ): Promise<Record<string, unknown> | null> {
-    const requestedFields = options?.requestedFields ?? null;
-
     const query = buildIdentifierQuery(identifier);
     if (!query) {
       return null;
     }
 
     const docs = await this.queryWorldDocuments(collection, query);
-
-    // Find the document by id, _id, or name
-    let doc: Record<string, unknown> | undefined;
-
-    if (identifier.id) {
-      doc = docs.find((d) => d.id === identifier.id || d._id === identifier.id);
-    } else if (identifier._id) {
-      doc = docs.find((d) => d._id === identifier._id || d.id === identifier._id);
-    } else if (identifier.name) {
-      doc = docs.find((d) => d.name === identifier.name);
-    }
-
-    if (!doc) {
-      return null;
-    }
-
-    // Filter fields
-    return filterDocumentFields(doc, requestedFields);
+    return pickDocument(docs, identifier, options?.requestedFields ?? null);
   }
 
   /**
@@ -1241,12 +1207,11 @@ export class FoundryClient {
     );
 
     const docs = (response.result as Record<string, unknown>[] | undefined) ?? [];
-    let filteredDocs = filterDocumentsByWhere(docs, options?.where ?? null);
-    filteredDocs = filteredDocs.map((doc) =>
-      filterDocumentFields(doc, options?.requestedFields ?? null)
-    );
-
-    return truncateDocuments(filteredDocs, options?.maxLength ?? 0);
+    return shapeDocuments(docs, {
+      where: options?.where ?? null,
+      requestedFields: options?.requestedFields ?? null,
+      maxLength: options?.maxLength ?? 0,
+    });
   }
 
   /**
@@ -1297,12 +1262,8 @@ export class FoundryClient {
       return null;
     }
 
-    const docs = await this.getPackDocuments(documentName, pack, {
-      query,
-      requestedFields: options?.requestedFields ?? null,
-    });
-
-    return docs[0] ?? null;
+    const docs = await this.getPackDocuments(documentName, pack, { query });
+    return pickDocument(docs, identifier, options?.requestedFields ?? null);
   }
 
   /**

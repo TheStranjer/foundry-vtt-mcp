@@ -1,32 +1,10 @@
 import type { FoundryClient } from "./foundry-client.js";
+import { DOCUMENT_TYPES, type DocumentTypeConfig } from "./core/collections.js";
 
-export interface DocumentTypeConfig {
-  singular: string;
-  plural: string;
-  collection: string;
-  description: string;
-  /** Foundry document class name, set only for types that can live in a compendium pack. */
-  documentName?: string;
-}
-
-export const DOCUMENT_TYPES: DocumentTypeConfig[] = [
-  { singular: "actor", plural: "actors", collection: "actors", description: "actor", documentName: "Actor" },
-  { singular: "item", plural: "items", collection: "items", description: "item", documentName: "Item" },
-  { singular: "folder", plural: "folders", collection: "folders", description: "folder" },
-  { singular: "user", plural: "users", collection: "users", description: "user" },
-  { singular: "scene", plural: "scenes", collection: "scenes", description: "scene", documentName: "Scene" },
-  { singular: "journal", plural: "journals", collection: "journal", description: "journal entry", documentName: "JournalEntry" },
-  { singular: "macro", plural: "macros", collection: "macros", description: "macro", documentName: "Macro" },
-  { singular: "card", plural: "cards", collection: "cards", description: "card", documentName: "Cards" },
-  { singular: "playlist", plural: "playlists", collection: "playlists", description: "playlist", documentName: "Playlist" },
-  { singular: "table", plural: "tables", collection: "tables", description: "table", documentName: "RollTable" },
-  { singular: "combat", plural: "combats", collection: "combats", description: "combats" },
-  { singular: "message", plural: "messages", collection: "messages", description: "messages" },
-  { singular: "setting", plural: "settings", collection: "settings", description: "settings" },
-];
+export { DOCUMENT_TYPES, type DocumentTypeConfig };
 
 function packProperty(config: DocumentTypeConfig) {
-  return config.documentName
+  return config.packable
     ? {
         pack: {
           type: "string",
@@ -390,327 +368,286 @@ export function successResponse(data: unknown) {
   };
 }
 
+type ToolArgs = Record<string, unknown> | undefined;
+type ToolResult = ReturnType<typeof successResponse> | ReturnType<typeof errorResponse>;
+
+interface ToolHandlerEntry {
+  /** Completes "Error <verb>: <message>" when the handler throws. */
+  verb: string;
+  run: (client: FoundryClient, args: ToolArgs) => Promise<ToolResult> | ToolResult;
+}
+
+function listHandler(config: DocumentTypeConfig): ToolHandlerEntry {
+  return {
+    verb: `fetching ${config.plural}`,
+    run: async (client, args) => {
+      const maxLength = args?.max_length as number | undefined;
+      const requestedFields = args?.requested_fields as string[] | undefined;
+      const where = args?.where as Record<string, unknown> | undefined;
+      const pack = args?.pack as string | undefined;
+
+      if (pack && !config.packable) {
+        return errorResponse(`Error: ${config.plural} cannot be stored in a compendium`);
+      }
+
+      const options = {
+        maxLength: maxLength || null,
+        requestedFields: requestedFields || null,
+        where: where || null,
+      };
+
+      return successResponse(
+        pack
+          ? await client.getPackDocuments(config.documentName, pack, options)
+          : await client.getDocuments(config.collection, options)
+      );
+    },
+  };
+}
+
+function getOneHandler(config: DocumentTypeConfig): ToolHandlerEntry {
+  return {
+    verb: `fetching ${config.description}`,
+    run: async (client, args) => {
+      const id = args?.id as string | undefined;
+      const _id = args?._id as string | undefined;
+      const docName = args?.name as string | undefined;
+      const requestedFields = args?.requested_fields as string[] | undefined;
+      const pack = args?.pack as string | undefined;
+
+      if (!id && !_id && !docName) {
+        return errorResponse("Error: Must provide at least one of: id, _id, or name");
+      }
+
+      if (pack && !config.packable) {
+        return errorResponse(`Error: ${config.plural} cannot be stored in a compendium`);
+      }
+
+      const identifier = { id, _id, name: docName };
+      const options = { requestedFields: requestedFields || null };
+      const doc = pack
+        ? await client.getPackDocument(config.documentName, pack, identifier, options)
+        : await client.getDocument(config.collection, identifier, options);
+
+      if (!doc) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `${config.description.charAt(0).toUpperCase() + config.description.slice(1)} not found`,
+            },
+          ],
+        };
+      }
+
+      return successResponse(doc);
+    },
+  };
+}
+
+const TOOL_HANDLERS: Readonly<Record<string, ToolHandlerEntry>> = {
+  ...Object.fromEntries(
+    DOCUMENT_TYPES.flatMap((config) => [
+      [`get_${config.plural}`, listHandler(config)],
+      [`get_${config.singular}`, getOneHandler(config)],
+    ])
+  ),
+
+  get_compendiums: {
+    verb: "fetching compendiums",
+    run: async (client, args) => {
+      const type = args?.type as string | undefined;
+      return successResponse(await client.getCompendiums({ type: type || null }));
+    },
+  },
+
+  get_world: {
+    verb: "fetching world",
+    run: async (client) => {
+      const excludeCollections = [...DOCUMENT_TYPES.map((config) => config.collection), ...[ 'packs', 'model', 'template', 'system' ]];
+      return successResponse(await client.getWorld(excludeCollections));
+    },
+  },
+
+  modify_document: {
+    verb: "modifying document",
+    run: async (client, args) => {
+      const type = args?.type as string | undefined;
+      const _id = args?._id as string | undefined;
+      const updates = args?.updates as Record<string, unknown>[] | undefined;
+      const parentUuid = args?.parent_uuid as string | undefined;
+      const pack = args?.pack as string | undefined;
+
+      if (!type) {
+        return errorResponse("Error: 'type' is required");
+      }
+      if (!_id) {
+        return errorResponse("Error: '_id' is required");
+      }
+      if (!updates || !Array.isArray(updates)) {
+        return errorResponse("Error: 'updates' must be an array of objects");
+      }
+
+      return successResponse(await client.modifyDocument(type, _id, updates, { parentUuid, pack }));
+    },
+  },
+
+  create_document: {
+    verb: "creating document",
+    run: async (client, args) => {
+      const type = args?.type as string | undefined;
+      const data = args?.data as Record<string, unknown>[] | undefined;
+      const parentUuid = args?.parent_uuid as string | undefined;
+      const pack = args?.pack as string | undefined;
+
+      if (!type) {
+        return errorResponse("Error: 'type' is required");
+      }
+      if (!data || !Array.isArray(data)) {
+        return errorResponse("Error: 'data' must be an array of objects");
+      }
+
+      return successResponse(await client.createDocument(type, data, { parentUuid, pack }));
+    },
+  },
+
+  delete_document: {
+    verb: "deleting document",
+    run: async (client, args) => {
+      const type = args?.type as string | undefined;
+      const ids = args?.ids as string[] | undefined;
+      const parentUuid = args?.parent_uuid as string | undefined;
+      const pack = args?.pack as string | undefined;
+
+      if (!type) {
+        return errorResponse("Error: 'type' is required");
+      }
+      if (!ids || !Array.isArray(ids) || ids.length === 0) {
+        return errorResponse("Error: 'ids' must be a non-empty array of strings");
+      }
+
+      return successResponse(await client.deleteDocument(type, ids, { parentUuid, pack }));
+    },
+  },
+
+  show_credentials: {
+    verb: "fetching credentials",
+    run: (client) => successResponse(client.getCredentialsInfo()),
+  },
+
+  choose_foundry_instance: {
+    verb: "switching Foundry instance",
+    run: async (client, args) => {
+      const itemOrder = args?.item_order as number | undefined;
+      const _id = args?._id as string | undefined;
+
+      if (itemOrder === undefined && _id === undefined) {
+        return errorResponse("Error: Must provide either item_order or _id");
+      }
+
+      await client.chooseFoundryInstance({ item_order: itemOrder, _id });
+
+      const hostname = client.getHostname();
+      return successResponse({
+        success: true,
+        message: `Successfully connected to ${hostname}`,
+        hostname,
+      });
+    },
+  },
+
+  upload_file: {
+    verb: "uploading file",
+    run: async (client, args) => {
+      const target = args?.target as string | undefined;
+      const filename = args?.filename as string | undefined;
+      const url = args?.url as string | undefined;
+      const imageData = args?.image_data as string | undefined;
+
+      if (!target) {
+        return errorResponse("Error: 'target' is required");
+      }
+      if (!filename) {
+        return errorResponse("Error: 'filename' is required");
+      }
+
+      return successResponse(
+        await client.uploadFile({ target, filename, url, image_data: imageData })
+      );
+    },
+  },
+
+  browse_files: {
+    verb: "browsing files",
+    run: async (client, args) => {
+      const target = args?.target as string | undefined;
+      const type = args?.type as string | undefined;
+      const extensions = args?.extensions as string[] | undefined;
+
+      if (!target) {
+        return errorResponse("Error: 'target' is required");
+      }
+
+      return successResponse(await client.browseFiles({ target, type, extensions }));
+    },
+  },
+
+  create_compendium: {
+    verb: "creating compendium",
+    run: async (client, args) => {
+      const label = args?.label as string | undefined;
+      const type = args?.type as string | undefined;
+
+      if (!label) {
+        return errorResponse("Error: 'label' is required");
+      }
+      if (!type) {
+        return errorResponse("Error: 'type' is required");
+      }
+
+      return successResponse(await client.createCompendium(label, type));
+    },
+  },
+
+  delete_compendium: {
+    verb: "deleting compendium",
+    run: async (client, args) => {
+      const name = args?.name as string | undefined;
+
+      if (!name) {
+        return errorResponse("Error: 'name' is required");
+      }
+
+      return successResponse(await client.deleteCompendium(name));
+    },
+  },
+};
+
+const CONNECTIONLESS_TOOLS = ["show_credentials", "choose_foundry_instance"];
+
 export function createToolHandler(foundryClient: FoundryClient) {
   return async (request: { params: { name: string; arguments?: Record<string, unknown> } }) => {
     const { name, arguments: args } = request.params;
 
-    const connectionlessTools = ["show_credentials", "choose_foundry_instance"];
-
     if (
-      !connectionlessTools.includes(name) &&
+      !CONNECTIONLESS_TOOLS.includes(name) &&
       !foundryClient.isConnected() &&
       !(await foundryClient.ensureConnected())
     ) {
       return errorResponse("Error: Not connected to FoundryVTT server");
     }
 
-    for (const config of DOCUMENT_TYPES) {
-      if (name === `get_${config.plural}`) {
-        try {
-          const maxLength = args?.max_length as number | undefined;
-          const requestedFields = args?.requested_fields as string[] | undefined;
-          const where = args?.where as Record<string, unknown> | undefined;
-          const pack = args?.pack as string | undefined;
-
-          if (pack) {
-            if (!config.documentName) {
-              return errorResponse(`Error: ${config.plural} cannot be stored in a compendium`);
-            }
-
-            const packDocs = await foundryClient.getPackDocuments(config.documentName, pack, {
-              maxLength: maxLength || null,
-              requestedFields: requestedFields || null,
-              where: where || null,
-            });
-
-            return successResponse(packDocs);
-          }
-
-          const docs = await foundryClient.getDocuments(config.collection, {
-            maxLength: maxLength || null,
-            requestedFields: requestedFields || null,
-            where: where || null,
-          });
-
-          return successResponse(docs);
-        } catch (error) {
-          return errorResponse(
-            `Error fetching ${config.plural}: ${error instanceof Error ? error.message : String(error)}`
-          );
-        }
-      }
-
-      if (name === `get_${config.singular}`) {
-        try {
-          const id = args?.id as string | undefined;
-          const _id = args?._id as string | undefined;
-          const docName = args?.name as string | undefined;
-          const requestedFields = args?.requested_fields as string[] | undefined;
-          const pack = args?.pack as string | undefined;
-
-          if (!id && !_id && !docName) {
-            return errorResponse("Error: Must provide at least one of: id, _id, or name");
-          }
-
-          if (pack && !config.documentName) {
-            return errorResponse(`Error: ${config.plural} cannot be stored in a compendium`);
-          }
-
-          const doc =
-            pack && config.documentName
-              ? await foundryClient.getPackDocument(
-                  config.documentName,
-                  pack,
-                  { id, _id, name: docName },
-                  { requestedFields: requestedFields || null }
-                )
-              : await foundryClient.getDocument(
-                  config.collection,
-                  { id, _id, name: docName },
-                  { requestedFields: requestedFields || null }
-                );
-
-          if (!doc) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `${config.description.charAt(0).toUpperCase() + config.description.slice(1)} not found`,
-                },
-              ],
-            };
-          }
-
-          return successResponse(doc);
-        } catch (error) {
-          return errorResponse(
-            `Error fetching ${config.description}: ${error instanceof Error ? error.message : String(error)}`
-          );
-        }
-      }
+    const entry = Object.hasOwn(TOOL_HANDLERS, name) ? TOOL_HANDLERS[name] : undefined;
+    if (!entry) {
+      throw new Error(`Unknown tool: ${name}`);
     }
 
-    if (name === "get_compendiums") {
-      try {
-        const type = args?.type as string | undefined;
-        const packs = await foundryClient.getCompendiums({ type: type || null });
-        return successResponse(packs);
-      } catch (error) {
-        return errorResponse(
-          `Error fetching compendiums: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
+    try {
+      return await entry.run(foundryClient, args);
+    } catch (error) {
+      return errorResponse(
+        `Error ${entry.verb}: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
-
-    if (name === "get_world") {
-      try {
-        const excludeCollections = [...DOCUMENT_TYPES.map((config) => config.collection), ...[ 'packs', 'model', 'template', 'system' ]];
-        const world = await foundryClient.getWorld(excludeCollections);
-        return successResponse(world);
-      } catch (error) {
-        return errorResponse(
-          `Error fetching world: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    }
-
-    if (name === "modify_document") {
-      try {
-        const type = args?.type as string | undefined;
-        const _id = args?._id as string | undefined;
-        const updates = args?.updates as Record<string, unknown>[] | undefined;
-        const parentUuid = args?.parent_uuid as string | undefined;
-        const pack = args?.pack as string | undefined;
-
-        if (!type) {
-          return errorResponse("Error: 'type' is required");
-        }
-        if (!_id) {
-          return errorResponse("Error: '_id' is required");
-        }
-        if (!updates || !Array.isArray(updates)) {
-          return errorResponse("Error: 'updates' must be an array of objects");
-        }
-
-        const result = await foundryClient.modifyDocument(type, _id, updates, { parentUuid, pack });
-        return successResponse(result);
-      } catch (error) {
-        return errorResponse(
-          `Error modifying document: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    }
-
-    if (name === "create_document") {
-      try {
-        const type = args?.type as string | undefined;
-        const data = args?.data as Record<string, unknown>[] | undefined;
-        const parentUuid = args?.parent_uuid as string | undefined;
-        const pack = args?.pack as string | undefined;
-
-        if (!type) {
-          return errorResponse("Error: 'type' is required");
-        }
-        if (!data || !Array.isArray(data)) {
-          return errorResponse("Error: 'data' must be an array of objects");
-        }
-
-        const result = await foundryClient.createDocument(type, data, { parentUuid, pack });
-        return successResponse(result);
-      } catch (error) {
-        return errorResponse(
-          `Error creating document: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    }
-
-    if (name === "delete_document") {
-      try {
-        const type = args?.type as string | undefined;
-        const ids = args?.ids as string[] | undefined;
-        const parentUuid = args?.parent_uuid as string | undefined;
-        const pack = args?.pack as string | undefined;
-
-        if (!type) {
-          return errorResponse("Error: 'type' is required");
-        }
-        if (!ids || !Array.isArray(ids) || ids.length === 0) {
-          return errorResponse("Error: 'ids' must be a non-empty array of strings");
-        }
-
-        const result = await foundryClient.deleteDocument(type, ids, { parentUuid, pack });
-        return successResponse(result);
-      } catch (error) {
-        return errorResponse(
-          `Error deleting document: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    }
-
-    if (name === "show_credentials") {
-      try {
-        const credentials = foundryClient.getCredentialsInfo();
-        return successResponse(credentials);
-      } catch (error) {
-        return errorResponse(
-          `Error fetching credentials: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    }
-
-    if (name === "choose_foundry_instance") {
-      try {
-        const itemOrder = args?.item_order as number | undefined;
-        const _id = args?._id as string | undefined;
-
-        if (itemOrder === undefined && _id === undefined) {
-          return errorResponse("Error: Must provide either item_order or _id");
-        }
-
-        await foundryClient.chooseFoundryInstance({ item_order: itemOrder, _id });
-
-        const hostname = foundryClient.getHostname();
-        return successResponse({
-          success: true,
-          message: `Successfully connected to ${hostname}`,
-          hostname,
-        });
-      } catch (error) {
-        return errorResponse(
-          `Error switching Foundry instance: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    }
-
-    if (name === "upload_file") {
-      try {
-        const target = args?.target as string | undefined;
-        const filename = args?.filename as string | undefined;
-        const url = args?.url as string | undefined;
-        const imageData = args?.image_data as string | undefined;
-
-        if (!target) {
-          return errorResponse("Error: 'target' is required");
-        }
-        if (!filename) {
-          return errorResponse("Error: 'filename' is required");
-        }
-
-        const result = await foundryClient.uploadFile({
-          target,
-          filename,
-          url,
-          image_data: imageData,
-        });
-        return successResponse(result);
-      } catch (error) {
-        return errorResponse(
-          `Error uploading file: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    }
-
-    if (name === "browse_files") {
-      try {
-        const target = args?.target as string | undefined;
-        const type = args?.type as string | undefined;
-        const extensions = args?.extensions as string[] | undefined;
-
-        if (!target) {
-          return errorResponse("Error: 'target' is required");
-        }
-
-        const result = await foundryClient.browseFiles({
-          target,
-          type,
-          extensions,
-        });
-        return successResponse(result);
-      } catch (error) {
-        return errorResponse(
-          `Error browsing files: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    }
-
-    if (name === "create_compendium") {
-      try {
-        const label = args?.label as string | undefined;
-        const type = args?.type as string | undefined;
-
-        if (!label) {
-          return errorResponse("Error: 'label' is required");
-        }
-        if (!type) {
-          return errorResponse("Error: 'type' is required");
-        }
-
-        const result = await foundryClient.createCompendium(label, type);
-        return successResponse(result);
-      } catch (error) {
-        return errorResponse(
-          `Error creating compendium: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    }
-
-    if (name === "delete_compendium") {
-      try {
-        const name = args?.name as string | undefined;
-
-        if (!name) {
-          return errorResponse("Error: 'name' is required");
-        }
-
-        const result = await foundryClient.deleteCompendium(name);
-        return successResponse(result);
-      } catch (error) {
-        return errorResponse(
-          `Error deleting compendium: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    }
-
-    throw new Error(`Unknown tool: ${name}`);
   };
 }
