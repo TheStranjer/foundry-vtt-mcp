@@ -5,12 +5,26 @@ export const ENGINE_PING = "2";
 /** Engine.IO pong frame (client -> server) sent in reply to a ping. */
 export const ENGINE_PONG = "3";
 
+/** Socket.IO connect packet (client -> server), the reply to the Engine.IO handshake. */
+export const SOCKET_CONNECT = "40";
+
 export function isEngineHandshake(message: string): boolean {
   return message.startsWith("0{");
 }
 
 export function isEnginePing(message: string): boolean {
   return message === ENGINE_PING;
+}
+
+/**
+ * The frame that answers an Engine.IO handshake (`0{...}` -> Socket.IO connect) or ping
+ * (`2` -> `3`), or null when the frame needs no transport-level reply. Every socket,
+ * bound or join-data, answers these the same way.
+ */
+export function engineReplyFor(message: string): string | null {
+  if (isEngineHandshake(message)) return SOCKET_CONNECT;
+  if (isEnginePing(message)) return ENGINE_PONG;
+  return null;
 }
 
 export function isSessionEvent(message: string): boolean {
@@ -129,4 +143,9 @@ export function buildModifyDocumentMessage(
   payload: unknown
 ): string {
   return `42${ackId}${JSON.stringify(payload)}`;
+}
+
+/** A Socket.IO event that expects an ack: `42<id>[event, ...args]`. */
+export function buildEmitMessage(ackId: number, event: string, args: unknown[] = []): string {
+  return `42${ackId}${JSON.stringify([event, ...args])}`;
 }

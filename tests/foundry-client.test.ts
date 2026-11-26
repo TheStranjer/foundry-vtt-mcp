@@ -1316,10 +1316,10 @@ describe("FoundryClient", () => {
     };
 
     const promise = client.requestWorldData();
-    ws.emit("message", "430" + JSON.stringify([{ ok: true }]));
+    ws.emit("message", "431" + JSON.stringify([{ ok: true }]));
 
     await expect(promise).resolves.toEqual({ ok: true });
-    expect(ws.send).toHaveBeenCalledWith('420["world"]');
+    expect(ws.send).toHaveBeenCalledWith('421["world"]');
   });
 
   test("requestWorldData rejects when not connected", async () => {
@@ -1339,9 +1339,9 @@ describe("FoundryClient", () => {
     };
 
     const promise = client.requestWorldData();
-    ws.emit("message", "430not-json");
+    ws.emit("message", "431[not-json");
 
-    await expect(promise).rejects.toThrow("Failed to parse world response");
+    await expect(promise).rejects.toThrow("Failed to parse ack response");
   });
 
   test("sendModifyDocumentRequest resolves on match", async () => {
@@ -1364,7 +1364,7 @@ describe("FoundryClient", () => {
       "modifyDocument"
     );
 
-    ws.emit("message", "43" + JSON.stringify([{ type: "Actor", action: "update", result: [] }]));
+    ws.emit("message", "431" + JSON.stringify([{ type: "Actor", action: "update", result: [] }]));
 
     await expect(promise).resolves.toEqual({ type: "Actor", action: "update", result: [] });
     jest.useRealTimers();
@@ -1415,8 +1415,8 @@ describe("FoundryClient", () => {
       "modifyDocument"
     );
 
-    ws.emit("message", "43" + JSON.stringify([{ type: "Other", action: "update", result: [] }]));
-    ws.emit("message", "43" + JSON.stringify([{ type: "Actor", error: "bad" }]));
+    ws.emit("message", "439" + JSON.stringify([{ type: "Other", action: "update", result: [] }]));
+    ws.emit("message", "431" + JSON.stringify([{ type: "Actor", error: "bad" }]));
 
     await expect(promise).resolves.toEqual({ type: "Actor", error: "bad" });
     jest.useRealTimers();
@@ -1445,6 +1445,228 @@ describe("FoundryClient", () => {
     jest.advanceTimersByTime(30000);
     await expect(promise).rejects.toThrow("timeout");
     jest.useRealTimers();
+  });
+
+  describe("socket acks go through one dispatcher", () => {
+    function connectedClient(overrides: Record<string, unknown> = {}) {
+      const made = createClient({ WebSocketCtor: TestWebSocket, ...overrides });
+      const ws = new TestWebSocket("ws://host");
+      (made.client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+      return { ...made, ws };
+    }
+
+    test("a world request takes the next ack id like any other request", async () => {
+      const { client, ws } = connectedClient();
+      (client as any).messageCounter = 4;
+
+      const world = client.requestWorldData();
+      const files = client.browseFiles({ target: "t" });
+
+      expect(ws.send).toHaveBeenNthCalledWith(1, '424["world"]');
+      expect(ws.send).toHaveBeenNthCalledWith(2, expect.stringMatching(/^425\["manageFiles"/));
+
+      ws.emit("message", "435" + JSON.stringify([{ dirs: [], files: [] }]));
+      ws.emit("message", "434" + JSON.stringify([{ packs: [] }]));
+
+      await expect(world).resolves.toEqual({ packs: [] });
+      await expect(files).resolves.toEqual({ dirs: [], files: [] });
+    });
+
+    test("a world frame is not parsed for a request that does not own it", async () => {
+      const { client, ws } = connectedClient();
+      (client as any).messageCounter = 1;
+
+      const first = client.createCompendium("A", "Actor");
+      const second = client.deleteCompendium("b");
+      const third = client.requestWorldData();
+      const parse = jest.spyOn(JSON, "parse");
+
+      ws.emit("message", "433" + JSON.stringify([{ big: "world" }]));
+
+      await expect(third).resolves.toEqual({ big: "world" });
+      expect(parse).toHaveBeenCalledTimes(1);
+      parse.mockRestore();
+
+      ws.emit("message", "431" + JSON.stringify([{ request: { action: "create" } }]));
+      ws.emit("message", "432" + JSON.stringify([{ request: { action: "delete" } }]));
+      await expect(first).resolves.toEqual({ request: { action: "create" } });
+      await expect(second).resolves.toEqual({ request: { action: "delete" } });
+    });
+
+    test("a frame for an unknown id is dropped without being parsed", () => {
+      jest.useFakeTimers();
+      const { client, ws } = connectedClient();
+      client.requestWorldData().catch(() => undefined);
+      const parse = jest.spyOn(JSON, "parse");
+
+      ws.emit("message", "4399" + JSON.stringify([{ big: "world" }]));
+      ws.emit("message", '42["userActivity","u1",{}]');
+
+      expect(parse).not.toHaveBeenCalled();
+      expect((client as any).ackDispatcher(ws).size).toBe(1);
+      parse.mockRestore();
+      jest.useRealTimers();
+    });
+
+    test("one dispatcher serves every request on a socket", async () => {
+      jest.useFakeTimers();
+      const { client, ws } = connectedClient();
+
+      const requests = [client.requestWorldData(), client.requestWorldData(), client.requestWorldData()];
+
+      expect(ws.listenerCount("message")).toBe(1);
+      expect((client as any).ackDispatcher(ws).size).toBe(3);
+      jest.advanceTimersByTime(30000);
+      for (const request of requests) {
+        await expect(request).rejects.toThrow("Timeout waiting for world data");
+      }
+      expect((client as any).ackDispatcher(ws).size).toBe(0);
+      jest.useRealTimers();
+    });
+
+    test("the bound socket's own handler is the only listener when it routes the acks", async () => {
+      const { client, ws } = connectedClient();
+      (client as any).setupWebSocketHandlers(ws);
+
+      const world = client.requestWorldData();
+      ws.emit("message", "431" + JSON.stringify([{ ok: true }]));
+
+      await expect(world).resolves.toEqual({ ok: true });
+      expect(ws.listenerCount("message")).toBe(1);
+    });
+
+    test("a timeout removes the pending entry and a late ack is dropped", async () => {
+      jest.useFakeTimers();
+      const { client, ws } = connectedClient();
+
+      const world = client.requestWorldData();
+      const assertion = expect(world).rejects.toThrow("Timeout waiting for world data (30s)");
+      expect((client as any).ackDispatcher(ws).size).toBe(1);
+      jest.advanceTimersByTime(30000);
+
+      await assertion;
+      expect((client as any).ackDispatcher(ws).size).toBe(0);
+      expect(() => ws.emit("message", "431" + JSON.stringify([{ late: true }]))).not.toThrow();
+      jest.useRealTimers();
+    });
+
+    test("a reply clears the timeout and the pending entry", async () => {
+      const clearTimeoutFn = jest.fn();
+      const { client, ws } = connectedClient({ clearTimeoutFn });
+
+      const world = client.requestWorldData();
+      ws.emit("message", "431" + JSON.stringify([{ ok: true }]));
+
+      await world;
+      expect(clearTimeoutFn).toHaveBeenCalledTimes(1);
+      expect((client as any).ackDispatcher(ws).size).toBe(0);
+    });
+
+    test("a malformed ack rejects its request", async () => {
+      const { client, ws } = connectedClient();
+
+      const world = client.requestWorldData();
+      ws.emit("message", "431[]");
+
+      await expect(world).rejects.toThrow("Invalid ack format: empty payload");
+    });
+
+    test("a modifyDocument ack of another document type rejects instead of waiting", async () => {
+      const { client, ws } = connectedClient();
+
+      const promise = (client as any).sendModifyDocumentRequest(
+        "Actor", "update", {}, "timeout", () => true, "modifyDocument"
+      );
+      ws.emit("message", "431" + JSON.stringify([{ type: "Other", result: [] }]));
+
+      await expect(promise).rejects.toThrow("Unexpected modifyDocument response for Actor");
+    });
+
+    test("a modifyDocument ack the caller does not accept rejects", async () => {
+      const { client, ws } = connectedClient();
+
+      const promise = (client as any).sendModifyDocumentRequest(
+        "Actor", "update", {}, "timeout", () => false, "modifyDocument"
+      );
+      ws.emit("message", "431" + JSON.stringify([{ type: "Actor", result: [] }]));
+
+      await expect(promise).rejects.toThrow("Unexpected modifyDocument response for Actor");
+    });
+
+    test("a browseFiles ack without dirs or error rejects", async () => {
+      const { client, ws } = connectedClient();
+
+      const promise = client.browseFiles({ target: "t" });
+      ws.emit("message", "431" + JSON.stringify([{ type: "Actor" }]));
+
+      await expect(promise).rejects.toThrow("Unexpected browseFiles response");
+    });
+
+    test("a compendium ack for the other action rejects", async () => {
+      const { client, ws } = connectedClient();
+
+      const promise = client.createCompendium("A", "Actor");
+      ws.emit("message", "431" + JSON.stringify([{ request: { action: "delete" } }]));
+
+      await expect(promise).rejects.toThrow("Unexpected createCompendium response");
+    });
+
+    test("the bound socket and the join-data socket answer the handshake and pings the same way", () => {
+      jest.useFakeTimers();
+      const { client, ws } = connectedClient();
+      (client as any).setupWebSocketHandlers(ws);
+      const joinWs = new TestWebSocket("ws://join");
+      jest.spyOn(client as any, "connectWebSocket").mockResolvedValue(joinWs);
+      const joining = (client as any).fetchJoinUsers("host", "sid", null);
+      joining.catch(() => undefined);
+
+      return Promise.resolve().then(() => Promise.resolve()).then(() => {
+        for (const socket of [ws, joinWs]) {
+          socket.emit("message", '0{"sid":"x"}');
+          expect(socket.send).toHaveBeenLastCalledWith("40");
+          socket.emit("message", "2");
+          expect(socket.send).toHaveBeenLastCalledWith("3");
+        }
+        jest.advanceTimersByTime(10000);
+        jest.useRealTimers();
+      });
+    });
+
+    test("waitForEvent resolves with the first frame the matcher accepts", async () => {
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+
+      const promise = (client as any).waitForEvent(
+        ws,
+        (message: string) => (message.startsWith("42") ? message : undefined),
+        1000,
+        "never"
+      );
+      ws.emit("message", "2");
+      ws.emit("message", '42["x"]');
+
+      await expect(promise).resolves.toBe('42["x"]');
+      expect(ws.listenerCount("message")).toBe(0);
+    });
+
+    test("waitForEvent times out and detaches", async () => {
+      jest.useFakeTimers();
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+
+      const promise = (client as any).waitForEvent(ws, () => undefined, 1000, "gave up");
+      const assertion = expect(promise).rejects.toThrow("gave up");
+      jest.advanceTimersByTime(1000);
+
+      await assertion;
+      expect(ws.listenerCount("message")).toBe(0);
+      jest.useRealTimers();
+    });
   });
 
   test("getWorld filters collections", async () => {
@@ -1735,7 +1957,7 @@ describe("FoundryClient", () => {
         extensions: [".png", ".jpg"],
       };
 
-      ws.emit("message", "43" + JSON.stringify([response]));
+      ws.emit("message", "431" + JSON.stringify([response]));
 
       await expect(promise).resolves.toEqual(response);
       expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('["manageFiles"'));
@@ -1798,7 +2020,7 @@ describe("FoundryClient", () => {
 
       const promise = client.browseFiles({ target: "worlds/test/assets" });
 
-      ws.emit("message", "43" + JSON.stringify([{
+      ws.emit("message", "431" + JSON.stringify([{
         dirs: [],
         error: "Directory not found",
       }]));
@@ -1862,7 +2084,7 @@ describe("FoundryClient", () => {
       const promise = client.browseFiles({ target: "worlds/test/assets" });
 
       // Send unrelated message (no dirs)
-      ws.emit("message", "43" + JSON.stringify([{ type: "Actor", result: [] }]));
+      ws.emit("message", "439" + JSON.stringify([{ type: "Actor", result: [] }]));
 
       // Then send the actual response
       const response = {
@@ -1874,7 +2096,7 @@ describe("FoundryClient", () => {
         files: [],
         extensions: [],
       };
-      ws.emit("message", "43" + JSON.stringify([response]));
+      ws.emit("message", "431" + JSON.stringify([response]));
 
       await expect(promise).resolves.toEqual(response);
       jest.useRealTimers();
@@ -1941,7 +2163,7 @@ describe("FoundryClient", () => {
         },
       };
 
-      ws.emit("message", "43" + JSON.stringify([response]));
+      ws.emit("message", "431" + JSON.stringify([response]));
 
       await expect(promise).resolves.toEqual(response);
       jest.useRealTimers();
@@ -1965,7 +2187,7 @@ describe("FoundryClient", () => {
         error: "Permission denied",
       };
 
-      ws.emit("message", "43" + JSON.stringify([response]));
+      ws.emit("message", "431" + JSON.stringify([response]));
 
       await expect(promise).rejects.toThrow("Create compendium failed: Permission denied");
       jest.useRealTimers();
@@ -2004,14 +2226,14 @@ describe("FoundryClient", () => {
       const promise = client.createCompendium("My NPCs", "Actor");
 
       // Send unrelated message (wrong action)
-      ws.emit("message", "43" + JSON.stringify([{ request: { action: "delete" }, result: "ok" }]));
+      ws.emit("message", "439" + JSON.stringify([{ request: { action: "delete" }, result: "ok" }]));
 
       // Send correct response
       const response = {
         request: { action: "create" },
         result: { label: "My NPCs", name: "my-npcs" },
       };
-      ws.emit("message", "43" + JSON.stringify([response]));
+      ws.emit("message", "431" + JSON.stringify([response]));
 
       await expect(promise).resolves.toEqual(response);
       jest.useRealTimers();
@@ -2064,7 +2286,7 @@ describe("FoundryClient", () => {
         result: "world.my-npcs",
       };
 
-      ws.emit("message", "43" + JSON.stringify([response]));
+      ws.emit("message", "431" + JSON.stringify([response]));
 
       await expect(promise).resolves.toEqual(response);
       jest.useRealTimers();
@@ -2088,7 +2310,7 @@ describe("FoundryClient", () => {
         error: "Compendium not found",
       };
 
-      ws.emit("message", "43" + JSON.stringify([response]));
+      ws.emit("message", "431" + JSON.stringify([response]));
 
       await expect(promise).rejects.toThrow("Delete compendium failed: Compendium not found");
       jest.useRealTimers();
@@ -2127,14 +2349,14 @@ describe("FoundryClient", () => {
       const promise = client.deleteCompendium("my-npcs");
 
       // Send unrelated message (wrong action)
-      ws.emit("message", "43" + JSON.stringify([{ request: { action: "create" }, result: {} }]));
+      ws.emit("message", "439" + JSON.stringify([{ request: { action: "create" }, result: {} }]));
 
       // Send correct response
       const response = {
         request: { action: "delete" },
         result: "world.my-npcs",
       };
-      ws.emit("message", "43" + JSON.stringify([response]));
+      ws.emit("message", "431" + JSON.stringify([response]));
 
       await expect(promise).resolves.toEqual(response);
       jest.useRealTimers();
