@@ -31,6 +31,11 @@ export function isSessionEvent(message: string): boolean {
   return message.includes('["session",');
 }
 
+/** Foundry broadcasts `42["manageCompendium", ...]` to other clients when a pack is created or deleted. */
+export function isManageCompendiumEvent(message: string): boolean {
+  return message.startsWith('42["manageCompendium"');
+}
+
 export interface SessionPayload {
   matched: boolean;
   sessionId: string | null;

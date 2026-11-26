@@ -7,6 +7,7 @@ import {
   ENGINE_PONG,
   isEngineHandshake,
   isEnginePing,
+  isManageCompendiumEvent,
   isSessionEvent,
   ackIdOf,
   parseAckMessage,
@@ -152,5 +153,14 @@ describe("socket protocol", () => {
   test("buildModifyDocumentMessage formats payload", () => {
     expect(buildModifyDocumentMessage(7, ["x"]))
       .toBe("427[\"x\"]");
+  });
+});
+
+describe("isManageCompendiumEvent", () => {
+  test("matches the broadcast event only", () => {
+    expect(isManageCompendiumEvent('42["manageCompendium",{"action":"create"}]')).toBe(true);
+    expect(isManageCompendiumEvent('421["manageCompendium",{}]')).toBe(false);
+    expect(isManageCompendiumEvent('431[{"request":{"action":"create"}}]')).toBe(false);
+    expect(isManageCompendiumEvent('42["session",null]')).toBe(false);
   });
 });

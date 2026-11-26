@@ -1669,6 +1669,237 @@ describe("FoundryClient", () => {
     });
   });
 
+  describe("world snapshot cache", () => {
+    const bigWorld = () => ({
+      title: "W",
+      modules: [{ id: "m", title: "M", esmodules: ["x"] }],
+      actors: [{ _id: "a" }],
+      messages: [{ _id: "msg" }],
+      system: { big: true },
+      packs: [{ id: "world.items", label: "Items", type: "Item", index: [{ _id: "1" }], folders: [] }],
+    });
+
+    function connected() {
+      const made = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (made.client as any).connection = {
+        hostname: "host",
+        credential: { _id: "c", hostname: "host", password: "p", userid: "u" } as FoundryCredential,
+        sessionId: "sid",
+        ws,
+      };
+      (made.client as any).setupWebSocketHandlers(ws);
+      return { ...made, ws };
+    }
+
+    /** Spy on requestWorldData so each call returns a fresh world and counts as one request. */
+    function worldSpy(client: FoundryClient, world: () => Record<string, unknown> = bigWorld) {
+      return jest.spyOn(client, "requestWorldData").mockImplementation(async () => world());
+    }
+
+    test("a second get_world or get_compendiums does not send a world request", async () => {
+      const { client, ws } = connected();
+
+      const first = client.getWorld(["actors"]);
+      expect(ws.send).toHaveBeenCalledTimes(1);
+      const id = (ws.send.mock.calls[0][0] as string).match(/^42(\d+)\["world"\]$/)![1];
+      ws.emit("message", `43${id}` + JSON.stringify([bigWorld()]));
+      await first;
+
+      await client.getWorld(["actors"]);
+      await client.getCompendiums();
+      expect(ws.send).toHaveBeenCalledTimes(1);
+    });
+
+    test("get_world keeps slim metadata and not the collections", async () => {
+      const { client } = connected();
+      worldSpy(client);
+
+      const world = await client.getWorld(["actors", "packs", "model", "template", "system"]);
+
+      expect(world).toEqual({
+        title: "W",
+        modules: [{ id: "m", title: "M", description: undefined, authors: undefined, url: undefined, version: undefined }],
+      });
+      const snapshot = (client as any).worldSnapshot;
+      expect(JSON.stringify(snapshot)).not.toContain("msg");
+      expect(snapshot.packs).toEqual([{ id: "world.items", label: "Items", type: "Item" }]);
+    });
+
+    test("get_compendiums and pack reads share the cache with get_world", async () => {
+      const { client } = connected();
+      const spy = worldSpy(client);
+      jest.spyOn(client as any, "sendGetRequest").mockResolvedValue({ result: [] });
+
+      await client.getWorld([]);
+      await expect(client.getCompendiums()).resolves.toEqual([
+        { id: "world.items", label: "Items", type: "Item" },
+      ]);
+      await client.getPackDocuments("Item", "world.items");
+      await expect(client.getPackDocuments("Actor", "world.items")).rejects.toThrow("holds Item");
+
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    test("concurrent first calls send one request", async () => {
+      const { client } = connected();
+      const spy = worldSpy(client);
+
+      await Promise.all([client.getWorld([]), client.getCompendiums(), client.getCompendiums()]);
+
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    test("a failed fetch is not cached", async () => {
+      const { client } = connected();
+      const spy = jest
+        .spyOn(client, "requestWorldData")
+        .mockRejectedValueOnce(new Error("boom"))
+        .mockResolvedValue(bigWorld());
+
+      await expect(client.getCompendiums()).rejects.toThrow("boom");
+      await expect(client.getCompendiums()).resolves.toHaveLength(1);
+
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
+    async function primed() {
+      const made = connected();
+      const spy = worldSpy(made.client);
+      await made.client.getCompendiums();
+      expect(spy).toHaveBeenCalledTimes(1);
+      return { ...made, spy };
+    }
+
+    test("adoptSocket (reconnect) invalidates the cache", async () => {
+      const { client, spy } = await primed();
+      const connection = (client as any).connection;
+
+      (client as any).adoptSocket(connection, new TestWebSocket("ws://new"), "sid2", 13);
+      await client.getCompendiums();
+
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
+    test("a replaced socket that is not adopted leaves the cache alone", async () => {
+      const { client, spy } = await primed();
+
+      (client as any).adoptSocket({ ...(client as any).connection }, new TestWebSocket("ws://new"), "s", 13);
+      await client.getCompendiums();
+
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    test("chooseFoundryInstance invalidates the cache", async () => {
+      const { client, spy } = await primed();
+      (client as any).credentials = [{ _id: "c", hostname: "host", password: "p", userid: "u" }];
+      const newWs = new TestWebSocket("ws://new");
+      jest.spyOn(client as any, "login").mockResolvedValue({
+        credential: (client as any).credentials[0],
+        sessionId: "s2",
+        generation: 13,
+        ws: newWs,
+      });
+
+      await client.chooseFoundryInstance({ item_order: 0 });
+      await client.getCompendiums();
+
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
+    test("disconnect invalidates the cache", async () => {
+      const { client, spy } = await primed();
+      const ws = (client as any).connection.ws;
+
+      client.disconnect();
+      (client as any).connection = { ...(client as any).connection, ws };
+      await client.getCompendiums();
+
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
+    test("an inbound manageCompendium event invalidates the cache", async () => {
+      const { client, ws, spy } = await primed();
+
+      ws.emit("message", '42["manageCompendium",{"action":"create","data":{"label":"X"}}]');
+      await client.getCompendiums();
+
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
+    test("other inbound events leave the cache alone", async () => {
+      const { client, ws, spy } = await primed();
+
+      ws.emit("message", '42["modifyDocument",{}]');
+      await client.getCompendiums();
+
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    test("a pack read after createCompendium sees the new pack", async () => {
+      const { client, ws } = connected();
+      let packs: Record<string, unknown>[] = [{ id: "world.items", type: "Item" }];
+      const spy = jest
+        .spyOn(client, "requestWorldData")
+        .mockImplementation(async () => ({ packs: packs.map((pack) => ({ ...pack })) }));
+      jest.spyOn(client as any, "sendGetRequest").mockResolvedValue({ result: [] });
+
+      await expect(client.getPackDocuments("Actor", "world.npcs")).rejects.toThrow("not found");
+
+      const created = client.createCompendium("NPCs", "Actor");
+      packs = [...packs, { id: "world.npcs", type: "Actor" }];
+      const id = (ws.send.mock.calls[0][0] as string).match(/^42(\d+)\[/)![1];
+      ws.emit("message", `43${id}` + JSON.stringify([{ request: { action: "create" } }]));
+      await created;
+
+      await expect(client.getPackDocuments("Actor", "world.npcs")).resolves.toEqual([]);
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
+    test("deleteCompendium invalidates the cache", async () => {
+      const { client, ws, spy } = await primed();
+
+      const deleted = client.deleteCompendium("items");
+      const id = (ws.send.mock.calls[0][0] as string).match(/^42(\d+)\[/)![1];
+      ws.emit("message", `43${id}` + JSON.stringify([{ request: { action: "delete" } }]));
+      await deleted;
+      await client.getCompendiums();
+
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
+    test("a failed createCompendium keeps the cache", async () => {
+      const { client, ws, spy } = await primed();
+
+      const created = client.createCompendium("NPCs", "Actor");
+      const id = (ws.send.mock.calls[0][0] as string).match(/^42(\d+)\[/)![1];
+      ws.emit("message", `43${id}` + JSON.stringify([{ request: { action: "create" }, error: "no" }]));
+      await expect(created).rejects.toThrow("Create compendium failed");
+      await client.getCompendiums();
+
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    test("a fetch in flight during an invalidation does not repopulate the cache", async () => {
+      const { client } = connected();
+      let release!: (world: Record<string, unknown>) => void;
+      const spy = jest
+        .spyOn(client, "requestWorldData")
+        .mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }))
+        .mockResolvedValue({ packs: [{ id: "world.new", type: "Item" }] });
+
+      const stale = client.getCompendiums();
+      (client as any).invalidateWorldSnapshot();
+      release({ packs: [{ id: "world.old", type: "Item" }] });
+      await stale;
+
+      await expect(client.getCompendiums()).resolves.toEqual([
+        { id: "world.new", label: "", type: "Item" },
+      ]);
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+  });
+
   test("getWorld filters collections", async () => {
     const { client } = createClient();
     jest.spyOn(client, "requestWorldData").mockResolvedValue({ actors: [], meta: { title: "x" } });
