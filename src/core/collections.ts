@@ -70,3 +70,20 @@ export function whereToServerQuery(where: Record<string, unknown> | null | undef
   }
   return query;
 }
+
+/**
+ * The fields to ask Foundry's index for (`index: true, indexFields`) when a read requests
+ * specific fields, or null when none are requested (the full documents are fetched).
+ * Always includes `_id` and `name`, since the output contract always returns them. Also
+ * includes every `where` key so the local filter can see it; filterDocumentFields drops
+ * those afterwards unless they were requested.
+ */
+export function buildIndexFields(
+  requestedFields: string[] | null | undefined,
+  where?: Record<string, unknown> | null
+): string[] | null {
+  if (!requestedFields || requestedFields.length === 0) {
+    return null;
+  }
+  return [...new Set(["_id", "name", ...requestedFields, ...Object.keys(where ?? {})])];
+}

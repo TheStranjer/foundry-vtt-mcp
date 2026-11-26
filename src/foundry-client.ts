@@ -15,7 +15,12 @@ import {
 } from "./core/credentials.js";
 import { pickDocument, shapeDocuments } from "./core/document-utils.js";
 import { type PackSummary, summarizePacks, validatePackAccess } from "./core/compendium.js";
-import { COLLECTION_DOCUMENT_NAMES, buildIdentifierQuery, whereToServerQuery } from "./core/collections.js";
+import {
+  COLLECTION_DOCUMENT_NAMES,
+  buildIdentifierQuery,
+  buildIndexFields,
+  whereToServerQuery,
+} from "./core/collections.js";
 import { buildDocumentOperation } from "./core/operations.js";
 import {
   buildEmitMessage,
@@ -82,6 +87,11 @@ const SOCKET_SETUP_TIMEOUT_MS = 10000;
 
 /** Silence allowed on a file upload or download, which can pause longer than a small API call. */
 const TRANSFER_TIMEOUT_MS = 60000;
+
+/** Operation fields for a get: Foundry's index returns only `indexFields` when set. */
+function indexOperation(indexFields: string[] | null): Record<string, unknown> {
+  return indexFields ? { index: true, indexFields } : { index: false };
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -1128,7 +1138,11 @@ export class FoundryClient {
     const requestedFields = options?.requestedFields ?? null;
     const where = options?.where ?? null;
 
-    const docs = await this.queryWorldDocuments(collection, whereToServerQuery(where));
+    const docs = await this.queryWorldDocuments(
+      collection,
+      whereToServerQuery(where),
+      buildIndexFields(requestedFields, where)
+    );
 
     return shapeDocuments(docs, { where, requestedFields, maxLength });
   }
@@ -1152,8 +1166,9 @@ export class FoundryClient {
       return null;
     }
 
-    const docs = await this.queryWorldDocuments(collection, query);
-    return pickDocument(docs, identifier, options?.requestedFields ?? null);
+    const requestedFields = options?.requestedFields ?? null;
+    const docs = await this.queryWorldDocuments(collection, query, buildIndexFields(requestedFields));
+    return pickDocument(docs, identifier, requestedFields);
   }
 
   /**
@@ -1187,6 +1202,24 @@ export class FoundryClient {
       where?: Record<string, unknown> | null;
     }
   ): Promise<Record<string, unknown>[]> {
+    const requestedFields = options?.requestedFields ?? null;
+    const where = options?.where ?? null;
+    const docs = await this.fetchPackDocuments(
+      documentName,
+      pack,
+      options?.query ?? {},
+      buildIndexFields(requestedFields, where)
+    );
+    return shapeDocuments(docs, { where, requestedFields, maxLength: options?.maxLength ?? 0 });
+  }
+
+  /** Raw compendium read; sends an index request when `indexFields` is given. */
+  private async fetchPackDocuments(
+    documentName: string,
+    pack: string,
+    query: Record<string, unknown>,
+    indexFields: string[] | null
+  ): Promise<Record<string, unknown>[]> {
     const worldData = await this.requestWorldData();
     const packError = validatePackAccess(worldData.packs, pack, documentName);
     if (packError) {
@@ -1198,20 +1231,15 @@ export class FoundryClient {
       {
         action: "get",
         pack,
-        query: options?.query ?? {},
-        index: false,
+        query,
+        ...indexOperation(indexFields),
         broadcast: false,
       },
       `Timeout waiting for compendium read response (30s) for ${pack}`,
       "getPackDocuments"
     );
 
-    const docs = (response.result as Record<string, unknown>[] | undefined) ?? [];
-    return shapeDocuments(docs, {
-      where: options?.where ?? null,
-      requestedFields: options?.requestedFields ?? null,
-      maxLength: options?.maxLength ?? 0,
-    });
+    return (response.result as Record<string, unknown>[] | undefined) ?? [];
   }
 
   /**
@@ -1221,7 +1249,8 @@ export class FoundryClient {
    */
   private async queryWorldDocuments(
     collection: string,
-    query: Record<string, unknown>
+    query: Record<string, unknown>,
+    indexFields: string[] | null = null
   ): Promise<Record<string, unknown>[]> {
     const documentName = COLLECTION_DOCUMENT_NAMES[collection];
     if (!documentName) {
@@ -1235,7 +1264,7 @@ export class FoundryClient {
 
     const response = await this.sendGetRequest(
       documentName,
-      { action: "get", query, index: false, broadcast: false },
+      { action: "get", query, ...indexOperation(indexFields), broadcast: false },
       `Timeout waiting for ${collection} read response (30s)`,
       "getWorldDocuments"
     );
@@ -1262,8 +1291,9 @@ export class FoundryClient {
       return null;
     }
 
-    const docs = await this.getPackDocuments(documentName, pack, { query });
-    return pickDocument(docs, identifier, options?.requestedFields ?? null);
+    const requestedFields = options?.requestedFields ?? null;
+    const docs = await this.fetchPackDocuments(documentName, pack, query, buildIndexFields(requestedFields));
+    return pickDocument(docs, identifier, requestedFields);
   }
 
   /**
