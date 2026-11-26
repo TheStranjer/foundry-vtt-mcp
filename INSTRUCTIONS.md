@@ -31,12 +31,17 @@ You can read and manipulate these document collections:
 ## Reading Documents
 
 ### List All Documents
-Use `get_actors`, `get_items`, `get_journals`, etc. to retrieve all documents of a type.
+Use `get_actors`, `get_items`, `get_journals`, etc. to list documents of a type, one page at a time. The response is `{ total, offset, returned, next_offset, documents }`: `total` is the count after the `where` filter, and `next_offset` is the `offset` for the next page (`null` when nothing is left).
 
 **Important parameters:**
-- `max_length`: Limit response size in bytes (documents removed until under limit)
-- `requested_fields`: Only return specific fields (always includes `_id` and `name`)
+- `limit`: Page size (default 100, maximum 1000)
+- `offset`: Documents to skip (default 0); pass `next_offset` from the previous page
+- `max_length`: Byte budget for the page's documents (default 200000; `0` means no limit). The page stops at the first document that doesn't fit. If the first document alone is over the budget, `documents` is empty and `oversized` gives its `_id`, `name` and `bytes`: fetch it with `requested_fields` or the singular tool (e.g. `get_actor`)
+- `requested_fields`: Fields to return (always includes `_id` and `name`). Without it you get only summary fields (`_id`, `name`, `type`, `folder` by default; messages: `_id`, `timestamp`, `speaker.alias`, `author`; settings: `_id`, `key`; users: `_id`, `name`, `role`). Use `["*"]` for full documents
 - `where`: Filter by field values (AND logic)
+- `sort` (`get_messages` only): `"newest"` (default) or `"oldest"`, by `timestamp`
+
+Singular tools (`get_actor`, ...) return the full document unless `requested_fields` is given.
 
 Example - Get all NPCs:
 ```json
@@ -109,7 +114,7 @@ If multiple Foundry servers are configured:
 3. **Respect permissions**: The server operates under the configured user's permissions
 4. **Be conservative**: Make minimal changes to accomplish the task
 5. **Preserve data**: When updating, only change the specific fields needed
-6. **Handle large worlds**: Use `max_length` and `requested_fields` to limit response sizes
+6. **Handle large worlds**: List tools return summary fields by default; page with `limit`/`offset`, ask for more with `requested_fields`, and fetch one full document with the singular tool
 7. **Understand the system**: Different game systems have different data structures
 
 ## Common Tasks

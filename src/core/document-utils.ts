@@ -59,25 +59,6 @@ export function filterDocumentFields(
   return filtered;
 }
 
-export function truncateDocuments(
-  docs: Record<string, unknown>[],
-  maxLength: number
-): Record<string, unknown>[] {
-  if (!maxLength || maxLength <= 0) {
-    return docs;
-  }
-
-  const result = [...docs];
-  while (result.length > 0) {
-    const json = JSON.stringify(result);
-    if (Buffer.byteLength(json, "utf-8") <= maxLength) {
-      return result;
-    }
-    result.pop();
-  }
-  return result;
-}
-
 export function filterDocumentsByWhere(
   docs: Record<string, unknown>[],
   where: Record<string, unknown> | null
@@ -99,19 +80,133 @@ export function filterDocumentsByWhere(
 export interface DocumentShape {
   where?: Record<string, unknown> | null;
   requestedFields?: string[] | null;
-  maxLength?: number | null;
 }
 
-/** Shared read pipeline: where filter, then field filter, then size truncation. */
+/** Shared read pipeline: where filter, then field filter. */
 export function shapeDocuments(
   docs: Record<string, unknown>[],
   shape: DocumentShape
 ): Record<string, unknown>[] {
   const requestedFields = shape.requestedFields ?? null;
-  const filtered = filterDocumentsByWhere(docs, shape.where ?? null).map((doc) =>
+  return filterDocumentsByWhere(docs, shape.where ?? null).map((doc) =>
     filterDocumentFields(doc, requestedFields)
   );
-  return truncateDocuments(filtered, shape.maxLength ?? 0);
+}
+
+export const DEFAULT_LIMIT = 100;
+export const MAX_LIMIT = 1000;
+/** Byte budget for one page of documents when `max_length` is omitted. */
+export const DEFAULT_MAX_LENGTH = 200000;
+
+export interface PageParams {
+  limit: number;
+  offset: number;
+  /** Byte budget for the page's documents; 0 means no limit. */
+  maxLength: number;
+}
+
+function toInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : null;
+}
+
+/**
+ * Apply the paging defaults: limit 100 clamped to 1..1000, offset 0 (never negative),
+ * max_length 200000 when omitted, and 0 (or a negative value) for no limit.
+ */
+export function resolvePageParams(input?: {
+  limit?: number | null;
+  offset?: number | null;
+  maxLength?: number | null;
+}): PageParams {
+  const limit = toInteger(input?.limit);
+  const offset = toInteger(input?.offset);
+  const maxLength = toInteger(input?.maxLength);
+  return {
+    limit: limit === null ? DEFAULT_LIMIT : Math.min(Math.max(limit, 1), MAX_LIMIT),
+    offset: offset === null ? 0 : Math.max(offset, 0),
+    maxLength: maxLength === null ? DEFAULT_MAX_LENGTH : Math.max(maxLength, 0),
+  };
+}
+
+export interface OversizedDocument {
+  _id: unknown;
+  name: unknown;
+  bytes: number;
+}
+
+export interface DocumentPage {
+  total: number;
+  offset: number;
+  returned: number;
+  next_offset: number | null;
+  documents: Record<string, unknown>[];
+  oversized?: OversizedDocument;
+  hint?: string;
+}
+
+/**
+ * Take documents in order while they fit the byte budget (the size of their JSON array),
+ * stopping at the first one that doesn't. Each document is serialised once. When the very
+ * first document alone exceeds the budget, nothing is taken and it is reported as oversized.
+ */
+export function fitToBudget(
+  docs: Record<string, unknown>[],
+  maxLength: number
+): { documents: Record<string, unknown>[]; oversized: OversizedDocument | null } {
+  if (!maxLength || maxLength <= 0) {
+    return { documents: docs, oversized: null };
+  }
+
+  let used = 2; // "[]"
+  let count = 0;
+  for (const doc of docs) {
+    const bytes = Buffer.byteLength(JSON.stringify(doc), "utf-8");
+    const next = used + bytes + (count > 0 ? 1 : 0);
+    if (next > maxLength) {
+      if (count === 0) {
+        return { documents: [], oversized: { _id: doc._id, name: doc.name ?? null, bytes } };
+      }
+      break;
+    }
+    used = next;
+    count++;
+  }
+  return { documents: docs.slice(0, count), oversized: null };
+}
+
+/**
+ * Build the list-tool envelope for one page. `candidates` are the documents the page starts
+ * with (already cut to `limit` by the caller), `total` is the count after the where filter and
+ * `offset` is the position of `candidates[0]` within that filtered list.
+ */
+export function buildPage(
+  candidates: Record<string, unknown>[],
+  total: number,
+  offset: number,
+  maxLength: number
+): DocumentPage {
+  const { documents, oversized } = fitToBudget(candidates, maxLength);
+  const end = offset + documents.length;
+  const page: DocumentPage = {
+    total,
+    offset,
+    returned: documents.length,
+    next_offset: oversized ? offset : end < total ? end : null,
+    documents,
+  };
+  if (oversized) {
+    page.oversized = oversized;
+    page.hint =
+      `Document ${String(oversized._id)} is ${oversized.bytes} bytes, over the max_length budget of ${maxLength}. ` +
+      `Fetch it with requested_fields (to pick only the fields you need) or with the singular get_ tool; ` +
+      `then continue with offset=${offset + 1}.`;
+  }
+  return page;
+}
+
+/** Page a fully loaded, where-filtered document list: slice by offset/limit, then apply the budget. */
+export function pageDocuments(docs: Record<string, unknown>[], params: PageParams): DocumentPage {
+  return buildPage(docs.slice(params.offset, params.offset + params.limit), docs.length, params.offset, params.maxLength);
 }
 
 /**

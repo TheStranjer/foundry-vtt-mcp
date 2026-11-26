@@ -13,12 +13,26 @@ import {
   parseCredentials,
   resolveCredentialIndex,
 } from "./core/credentials.js";
-import { pickDocument, shapeDocuments } from "./core/document-utils.js";
+import {
+  buildPage,
+  filterDocumentFields,
+  filterDocumentsByWhere,
+  pageDocuments,
+  pickDocument,
+  resolvePageParams,
+  shapeDocuments,
+  type DocumentPage,
+  type PageParams,
+} from "./core/document-utils.js";
 import { type PackSummary, summarizePacks, validatePackAccess } from "./core/compendium.js";
 import {
   COLLECTION_DOCUMENT_NAMES,
   buildIdentifierQuery,
   buildIndexFields,
+  resolveRequestedFields,
+  sortFieldForCollection,
+  summaryFieldsForCollection,
+  summaryFieldsForDocumentName,
   whereToServerQuery,
 } from "./core/collections.js";
 import { buildDocumentOperation } from "./core/operations.js";
@@ -91,6 +105,42 @@ const SOCKET_SETUP_TIMEOUT_MS = 10000;
 const TRANSFER_TIMEOUT_MS = 60000;
 
 /** Operation fields for a get: Foundry's index returns only `indexFields` when set. */
+/** How many single-document reads a sorted page runs at once. */
+const SORTED_PAGE_CONCURRENCY = 10;
+
+/** Order documents by a (numeric) field, ties and missing values broken by _id so pages are stable. */
+function sortDocuments(
+  docs: Record<string, unknown>[],
+  field: string,
+  ascending: boolean
+): Record<string, unknown>[] {
+  const direction = ascending ? 1 : -1;
+  const keyOf = (doc: Record<string, unknown>): number => (typeof doc[field] === "number" ? doc[field] : 0);
+  return [...docs].sort((a, b) => {
+    const diff = keyOf(a) - keyOf(b);
+    if (diff !== 0) return diff * direction;
+    return String(a._id).localeCompare(String(b._id)) * direction;
+  });
+}
+
+/** Map with at most `limit` calls in flight; results keep the input order. */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 function indexOperation(indexFields: string[] | null): Record<string, unknown> {
   return indexFields ? { index: true, indexFields } : { index: false };
 }
@@ -1172,32 +1222,77 @@ export class FoundryClient {
   }
 
   /**
-   * Request documents from a specific collection in the world
+   * Request one page of documents from a specific collection in the world
    * @param collection - The collection name (actors, items, folders, users, scenes, journal)
-   * @param options.maxLength - Maximum bytes for the JSON response; documents removed until under limit
-   * @param options.requestedFields - Array of field names to include (always includes _id and name)
+   * @param options.limit - Page size (default 100, at most 1000)
+   * @param options.offset - Position of the first document of the page (default 0)
+   * @param options.maxLength - Byte budget for the page's documents (default 200000; 0 means no limit)
+   * @param options.requestedFields - Fields to include (always includes _id and name). Absent or empty
+   *   returns the collection's summary fields; ["*"] returns full documents.
    * @param options.where - Filter documents by field values (AND logic for all conditions)
-   * @returns Array of document objects
+   * @param options.sort - "newest" (default) or "oldest"; only for collections with a sort field (messages)
+   * @returns The page envelope: total, offset, returned, next_offset, documents
    */
   async getDocuments(
     collection: string,
     options?: {
+      limit?: number | null;
+      offset?: number | null;
       maxLength?: number | null;
       requestedFields?: string[] | null;
       where?: Record<string, unknown> | null;
+      sort?: "newest" | "oldest" | null;
     }
-  ): Promise<Record<string, unknown>[]> {
-    const maxLength = options?.maxLength ?? 0;
-    const requestedFields = options?.requestedFields ?? null;
+  ): Promise<DocumentPage> {
+    const params = resolvePageParams(options);
+    const fields = resolveRequestedFields(options?.requestedFields, summaryFieldsForCollection(collection));
     const where = options?.where ?? null;
+    const sortField = sortFieldForCollection(collection);
+
+    if (sortField) {
+      return this.getSortedPage(collection, sortField, options?.sort ?? "newest", fields, where, params);
+    }
 
     const docs = await this.queryWorldDocuments(
       collection,
       whereToServerQuery(where),
-      buildIndexFields(requestedFields, where)
+      buildIndexFields(fields, where)
     );
 
-    return shapeDocuments(docs, { where, requestedFields, maxLength });
+    return pageDocuments(shapeDocuments(docs, { where, requestedFields: fields }), params);
+  }
+
+  /**
+   * One page of a collection ordered by `sortField` (Foundry returns documents in _id order).
+   * Fetches only _id and the sort field for every document through the index, sorts, cuts the
+   * page, and then fetches the requested fields for just that page's documents. Foundry's
+   * query matches fields exactly (no $in), so the page's documents are fetched one by one.
+   */
+  private async getSortedPage(
+    collection: string,
+    sortField: string,
+    sort: "newest" | "oldest",
+    fields: string[] | null,
+    where: Record<string, unknown> | null,
+    params: PageParams
+  ): Promise<DocumentPage> {
+    const order = await this.queryWorldDocuments(
+      collection,
+      whereToServerQuery(where),
+      buildIndexFields([sortField], where)
+    );
+    const sorted = sortDocuments(filterDocumentsByWhere(order, where), sortField, sort === "oldest");
+    const pageIds = sorted.slice(params.offset, params.offset + params.limit).map((doc) => String(doc._id));
+
+    const fetched = await mapWithConcurrency(pageIds, SORTED_PAGE_CONCURRENCY, async (id) => {
+      const docs = await this.queryWorldDocuments(collection, { _id: id }, buildIndexFields(fields));
+      return docs.find((doc) => doc._id === id) ?? null;
+    });
+    const documents = fetched
+      .filter((doc): doc is Record<string, unknown> => doc !== null)
+      .map((doc) => filterDocumentFields(doc, fields));
+
+    return buildPage(documents, sorted.length, params.offset, params.maxLength);
   }
 
   /**
@@ -1219,7 +1314,7 @@ export class FoundryClient {
       return null;
     }
 
-    const requestedFields = options?.requestedFields ?? null;
+    const requestedFields = resolveRequestedFields(options?.requestedFields);
     const docs = await this.queryWorldDocuments(collection, query, buildIndexFields(requestedFields));
     return pickDocument(docs, identifier, requestedFields);
   }
@@ -1235,27 +1330,33 @@ export class FoundryClient {
   }
 
   /**
-   * Read documents out of a compendium pack. Uses the same modifyDocument socket message
-   * as create/modify/delete, with action "get" and the pack in the operation.
+   * Read one page of documents out of a compendium pack. Uses the same modifyDocument socket
+   * message as create/modify/delete, with action "get" and the pack in the operation.
    * @param documentName - The document type the pack holds (Actor, Item, JournalEntry, ...)
    * @param pack - The compendium pack ID (e.g. "world.my-items", "my-module.items")
    * @param options.query - Foundry query object; an empty query returns the whole pack
-   * @param options.maxLength - Maximum bytes for the JSON response; documents removed until under limit
-   * @param options.requestedFields - Array of field names to include (always includes _id and name)
+   * @param options.limit - Page size (default 100, at most 1000)
+   * @param options.offset - Position of the first document of the page (default 0)
+   * @param options.maxLength - Byte budget for the page's documents (default 200000; 0 means no limit)
+   * @param options.requestedFields - Fields to include (always includes _id and name). Absent or empty
+   *   returns the document type's summary fields; ["*"] returns full documents.
    * @param options.where - Filter documents by field values (AND logic for all conditions)
-   * @returns Array of document objects
+   * @returns The page envelope: total, offset, returned, next_offset, documents
    */
   async getPackDocuments(
     documentName: string,
     pack: string,
     options?: {
       query?: Record<string, unknown>;
+      limit?: number | null;
+      offset?: number | null;
       maxLength?: number | null;
       requestedFields?: string[] | null;
       where?: Record<string, unknown> | null;
     }
-  ): Promise<Record<string, unknown>[]> {
-    const requestedFields = options?.requestedFields ?? null;
+  ): Promise<DocumentPage> {
+    const params = resolvePageParams(options);
+    const requestedFields = resolveRequestedFields(options?.requestedFields, summaryFieldsForDocumentName(documentName));
     const where = options?.where ?? null;
     const docs = await this.fetchPackDocuments(
       documentName,
@@ -1263,7 +1364,7 @@ export class FoundryClient {
       options?.query ?? {},
       buildIndexFields(requestedFields, where)
     );
-    return shapeDocuments(docs, { where, requestedFields, maxLength: options?.maxLength ?? 0 });
+    return pageDocuments(shapeDocuments(docs, { where, requestedFields }), params);
   }
 
   /** Raw compendium read; sends an index request when `indexFields` is given. */
@@ -1344,7 +1445,7 @@ export class FoundryClient {
       return null;
     }
 
-    const requestedFields = options?.requestedFields ?? null;
+    const requestedFields = resolveRequestedFields(options?.requestedFields);
     const docs = await this.fetchPackDocuments(documentName, pack, query, buildIndexFields(requestedFields));
     return pickDocument(docs, identifier, requestedFields);
   }

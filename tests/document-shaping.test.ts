@@ -19,10 +19,6 @@ describe("shapeDocuments", () => {
     expect(shapeDocuments(docs, {})).toEqual(docs);
   });
 
-  test("truncates to maxLength", () => {
-    const one = Buffer.byteLength(JSON.stringify([docs[0]]), "utf-8");
-    expect(shapeDocuments(docs, { maxLength: one })).toEqual([docs[0]]);
-  });
 });
 
 describe("pickDocument", () => {

@@ -845,7 +845,7 @@ describe("FoundryClient", () => {
       .rejects.toThrow("Response does not contain actors array");
   });
 
-  test("getDocuments filters and truncates", async () => {
+  test("getDocuments filters and pages", async () => {
     const { client } = createClient();
     jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({
       result: [
@@ -854,13 +854,14 @@ describe("FoundryClient", () => {
       ],
     });
 
-    const docs = await client.getDocuments("actors", {
+    const page = await client.getDocuments("actors", {
       requestedFields: ["type"],
       where: { type: "npc" },
       maxLength: 1000,
     });
 
-    expect(docs).toEqual([{ _id: "1", name: "A", type: "npc" }]);
+    expect(page.documents).toEqual([{ _id: "1", name: "A", type: "npc" }]);
+    expect(page.total).toBe(1);
   });
 
   test("getDocument resolves dot-notation fields end to end", async () => {
@@ -962,12 +963,12 @@ describe("FoundryClient", () => {
         ],
       });
 
-      const docs = await client.getPackDocuments("Item", "world.my-items", {
+      const page = await client.getPackDocuments("Item", "world.my-items", {
         where: { type: "weapon" },
         requestedFields: ["type"],
       });
 
-      expect(docs).toEqual([{ _id: "1", name: "Sword", type: "weapon" }]);
+      expect(page.documents).toEqual([{ _id: "1", name: "Sword", type: "weapon" }]);
       expect((client as any).sendModifyDocumentRequest).toHaveBeenCalledWith(
         "Item",
         "get",
@@ -985,12 +986,12 @@ describe("FoundryClient", () => {
       );
     });
 
-    test("getPackDocuments sends no index when no fields are requested", async () => {
+    test("getPackDocuments sends no index when full documents are requested", async () => {
       const { client } = createClient();
       jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
       const send = jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({ result: [] });
 
-      await client.getPackDocuments("Item", "world.my-items", { requestedFields: [] });
+      await client.getPackDocuments("Item", "world.my-items", { requestedFields: ["*"] });
 
       const operation = send.mock.calls[0][2] as any;
       expect(operation.index).toBe(false);
@@ -1027,7 +1028,7 @@ describe("FoundryClient", () => {
       expect(isMatch({})).toBe(false);
     });
 
-    test("getPackDocuments truncates to maxLength", async () => {
+    test("getPackDocuments pages to maxLength", async () => {
       const { client } = createClient();
       jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
       jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({
@@ -1037,9 +1038,10 @@ describe("FoundryClient", () => {
         ],
       });
 
-      const docs = await client.getPackDocuments("Item", "world.my-items", { maxLength: 260 });
+      const page = await client.getPackDocuments("Item", "world.my-items", { maxLength: 260 });
 
-      expect(docs).toHaveLength(1);
+      expect(page.documents).toHaveLength(1);
+      expect(page.next_offset).toBe(1);
     });
 
     test("getPackDocuments rejects an unknown pack without sending a request", async () => {
@@ -1131,7 +1133,7 @@ describe("FoundryClient", () => {
     expect(get).toHaveBeenCalledWith(
       "JournalEntry",
       "get",
-      { action: "get", query: {}, index: false, broadcast: false },
+      { action: "get", query: {}, index: true, indexFields: ["_id", "name", "folder"], broadcast: false },
       expect.any(String),
       expect.any(Function),
       "getWorldDocuments"
@@ -1159,13 +1161,13 @@ describe("FoundryClient", () => {
       result: [{ _id: "1", name: "A", type: "npc", folder: null }],
     });
 
-    const docs = await client.getDocuments("actors", {
+    const page = await client.getDocuments("actors", {
       where: { type: "npc", folder: null, "system.level": 3, flags: { x: 1 } },
     });
 
     expect((get.mock.calls[0][2] as any).query).toEqual({ type: "npc" });
     // The local filter still runs on what the server returns.
-    expect(docs).toEqual([]);
+    expect(page.documents).toEqual([]);
   });
 
   describe("index requests", () => {
@@ -1198,21 +1200,32 @@ describe("FoundryClient", () => {
         result: [{ _id: "1", name: "A", type: "npc", system: { hp: 5 } }],
       });
 
-      await expect(
-        client.getDocuments("actors", { requestedFields: ["system.hp"], where: { type: "npc" } })
-      ).resolves.toEqual([{ _id: "1", name: "A", system: { hp: 5 } }]);
+      const page = await client.getDocuments("actors", { requestedFields: ["system.hp"], where: { type: "npc" } });
+      expect(page.documents).toEqual([{ _id: "1", name: "A", system: { hp: 5 } }]);
     });
 
-    test("no index is sent when no fields are requested", async () => {
+    test("no index is sent when full documents are requested", async () => {
       const { client } = createClient();
       const get = jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({ result: actors });
 
-      await client.getDocuments("actors", { where: { type: "npc" }, requestedFields: [] });
-      await client.getDocuments("actors");
+      await client.getDocuments("actors", { where: { type: "npc" }, requestedFields: ["*"] });
+      await client.getDocument("actors", { _id: "1" });
 
       for (const call of get.mock.calls) {
         expect(call[2]).toMatchObject({ index: false });
         expect(call[2]).not.toHaveProperty("indexFields");
+      }
+    });
+
+    test("empty requested fields send the summary index", async () => {
+      const { client } = createClient();
+      const get = jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({ result: actors });
+
+      await client.getDocuments("actors", { requestedFields: [] });
+      await client.getDocuments("actors");
+
+      for (const call of get.mock.calls) {
+        expect(call[2]).toMatchObject({ index: true, indexFields: ["_id", "name", "type", "folder"] });
       }
     });
 
@@ -1233,9 +1246,8 @@ describe("FoundryClient", () => {
       jest.spyOn(client, "requestWorldData").mockResolvedValue({ widgets: [{ _id: "1", name: "W", x: 1, y: 2 }] });
       const get = jest.spyOn(client as any, "sendModifyDocumentRequest");
 
-      await expect(client.getDocuments("widgets", { requestedFields: ["x"] })).resolves.toEqual([
-        { _id: "1", name: "W", x: 1 },
-      ]);
+      const page = await client.getDocuments("widgets", { requestedFields: ["x"] });
+      expect(page.documents).toEqual([{ _id: "1", name: "W", x: 1 }]);
       expect(get).not.toHaveBeenCalled();
     });
 
@@ -1275,7 +1287,10 @@ describe("FoundryClient", () => {
     jest.spyOn(client, "requestWorldData").mockResolvedValue({ widgets: [{ _id: "1", name: "W" }] });
     const get = jest.spyOn(client as any, "sendModifyDocumentRequest");
 
-    await expect(client.getDocuments("widgets")).resolves.toEqual([{ _id: "1", name: "W" }]);
+    await expect(client.getDocuments("widgets")).resolves.toMatchObject({
+      total: 1,
+      documents: [{ _id: "1", name: "W" }],
+    });
     expect(get).not.toHaveBeenCalled();
   });
 
@@ -1975,7 +1990,7 @@ describe("FoundryClient", () => {
       ws.emit("message", `43${id}` + JSON.stringify([{ request: { action: "create" } }]));
       await created;
 
-      await expect(client.getPackDocuments("Actor", "world.npcs")).resolves.toEqual([]);
+      await expect(client.getPackDocuments("Actor", "world.npcs")).resolves.toMatchObject({ total: 0, documents: [] });
       expect(spy).toHaveBeenCalledTimes(2);
     });
 

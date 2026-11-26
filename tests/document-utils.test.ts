@@ -1,7 +1,6 @@
 import {
   filterDocumentFields,
   filterDocumentsByWhere,
-  truncateDocuments,
 } from "../src/core/document-utils.js";
 
 describe("document utils", () => {
@@ -208,29 +207,6 @@ describe("document utils", () => {
       name: "A",
       system: { a: 1, b: 2, injected: true },
     });
-  });
-
-  test("truncateDocuments returns all docs when no limit set", () => {
-    const docs = [{ a: 1 }, { b: 2 }];
-    expect(truncateDocuments(docs, 0)).toBe(docs);
-    expect(truncateDocuments(docs, -1)).toBe(docs);
-  });
-
-  test("truncateDocuments keeps docs under limit", () => {
-    const docs = [{ a: 1 }, { b: 2 }];
-    const maxLength = Buffer.byteLength(JSON.stringify(docs), "utf-8");
-    expect(truncateDocuments(docs, maxLength)).toEqual(docs);
-  });
-
-  test("truncateDocuments removes until under limit", () => {
-    const docs = [{ a: "a".repeat(50) }, { b: "b".repeat(50) }];
-    const maxLength = Buffer.byteLength(JSON.stringify([docs[0]]), "utf-8");
-    expect(truncateDocuments(docs, maxLength)).toEqual([docs[0]]);
-  });
-
-  test("truncateDocuments returns empty when too small", () => {
-    const docs = [{ a: "a" }];
-    expect(truncateDocuments(docs, 1)).toEqual([]);
   });
 
   test("filterDocumentsByWhere returns original when no filter", () => {

@@ -36,9 +36,14 @@ MCP server for direct FoundryVTT WebSocket communication. No modules or headless
 | `get_settings` | World settings |
 
 **Common Parameters:**
-- `max_length` (int): Truncate response to N bytes
-- `requested_fields` (string[]): Return only these fields (always includes `_id`, `name`)
+List tools return `{ total, offset, returned, next_offset, documents }` (`next_offset` is `null` on the last page).
+
+- `limit` (int): Page size (default 100, max 1000)
+- `offset` (int): Documents to skip (default 0); pass `next_offset` for the next page
+- `max_length` (int): Byte budget for the page's documents (default 200000; `0` = no limit). If the first document alone exceeds it, `documents` is empty and `oversized` `{ _id, name, bytes }` names it; fetch it with `requested_fields` or the singular tool
+- `requested_fields` (string[]): Fields to return (always includes `_id`, `name`). Omitted/empty returns summary fields only (`_id`, `name`, `type`, `folder`; messages `timestamp`, `speaker.alias`, `author`; settings `key`; users `role`). `["*"]` returns full documents
 - `where` (object): Filter by field values (AND logic)
+- `sort` (`get_messages` only): `"newest"` (default) or `"oldest"`, by `timestamp`
 
 ### Document Retrieval (Single)
 
@@ -47,7 +52,7 @@ Same names without `s` suffix: `get_actor`, `get_item`, `get_scene`, etc.
 **Parameters (one required):**
 - `id` or `_id`: Document ID
 - `name`: Document name
-- `requested_fields`: Optional field filter
+- `requested_fields`: Optional field filter (without it, the full document is returned)
 
 ### Document Manipulation
 
@@ -92,7 +97,7 @@ Same names without `s` suffix: `get_actor`, `get_item`, `get_scene`, etc.
 ## Best Practices
 
 1. **Inspect before modify**: Use `get_*` tools to understand document structure before changes
-2. **Use `requested_fields`**: Limit response size for large collections
+2. **Use `requested_fields`**: List tools return summary fields by default; request the fields you need, or `["*"]` for full documents
 3. **Use `where` filtering**: Query efficiently instead of fetching all documents
 4. **Preserve existing data**: When updating, only include fields you want to change
 5. **Check `type` field**: Actors and Items have subtypes that affect available fields
@@ -106,6 +111,6 @@ Same names without `s` suffix: `get_actor`, `get_item`, `get_scene`, etc.
 | Unknown field | Inspect existing document to discover correct path |
 | Update ignored | Check field path matches system schema |
 | Permission denied | Verify MCP user has ownership of document |
-| Large response | Use `max_length` and `requested_fields` |
+| Large response or empty `documents` with `oversized` | Page with `limit`/`offset`, narrow `requested_fields`, or fetch the document with the singular tool |
 | Document not found | Try both `id` and `name` parameters |
 | Embedded item update silently ignored | Use nested object syntax in `items[]`, not dot notation. `{"system": {"value": 3}}` works; `{"system.value": 3}` does not. |
