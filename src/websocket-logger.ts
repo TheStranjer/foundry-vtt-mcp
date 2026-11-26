@@ -108,13 +108,6 @@ export class WebSocketLogger {
   }
 
   /**
-   * Check if logging is enabled
-   */
-  isEnabled(): boolean {
-    return this.enabled;
-  }
-
-  /**
    * Close the logger and write session footer
    */
   close(): void {

@@ -2,12 +2,24 @@ import { WebSocketLogger } from "../src/websocket-logger.js";
 
 describe("WebSocketLogger", () => {
   test("disabled when WEBSOCKETS_DIRECTORY not set", () => {
+    const appendFileSync = jest.fn();
+    const fs = {
+      existsSync: jest.fn(() => true),
+      mkdirSync: jest.fn(),
+      appendFileSync,
+    };
     const logger = new WebSocketLogger({
+      fs,
       env: {},
       logger: { error: jest.fn() },
     });
 
-    expect(logger.isEnabled()).toBe(false);
+    logger.logOutbound("out");
+    logger.logInbound("in");
+    logger.close();
+
+    expect(fs.mkdirSync).not.toHaveBeenCalled();
+    expect(appendFileSync).not.toHaveBeenCalled();
   });
 
   test("initializes and writes header", () => {
@@ -28,8 +40,9 @@ describe("WebSocketLogger", () => {
     });
 
     expect(fs.mkdirSync).toHaveBeenCalledWith("/tmp/ws", { recursive: true });
-    expect(logger.isEnabled()).toBe(true);
-    expect(appendFileSync).toHaveBeenCalled();
+    expect(appendFileSync).toHaveBeenCalledTimes(1);
+    logger.logOutbound("out");
+    expect(appendFileSync).toHaveBeenCalledTimes(2);
   });
 
   test("logOutbound and logInbound append entries", () => {
@@ -71,8 +84,8 @@ describe("WebSocketLogger", () => {
     });
 
     logger.close();
+    logger.logOutbound("after close");
 
-    expect(logger.isEnabled()).toBe(false);
     expect(appendFileSync).toHaveBeenCalledTimes(2);
   });
 
@@ -92,7 +105,7 @@ describe("WebSocketLogger", () => {
       logger: { error: jest.fn() },
     });
 
-    expect(logger.isEnabled()).toBe(false);
+    logger.logOutbound("out");
     expect(appendFileSync).not.toHaveBeenCalled();
   });
 });
