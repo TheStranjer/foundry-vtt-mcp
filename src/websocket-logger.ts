@@ -6,13 +6,24 @@ import * as path from "path";
  * WebSocket message logger that writes all inbound and outbound messages to a file.
  * Enabled via the WEBSOCKETS_DIRECTORY environment variable.
  * Each session creates a new log file with a timestamp-based name.
- * Uses synchronous writes to ensure immediate flushing for `tail -f` compatibility.
+ * Writes go through an append-mode write stream: they are queued in order and
+ * flushed immediately (no batching), so `tail -f` works without blocking the event loop.
  */
+export interface LogStream {
+  write(chunk: string): unknown;
+  end(chunk?: string): unknown;
+  on(event: "error", listener: (error: Error) => void): unknown;
+}
+
+export type CreateWriteStream = (path: string, options: { flags: string }) => LogStream;
+
 export class WebSocketLogger {
   private logFilePath: string | null = null;
   private enabled: boolean = false;
   private sessionId: string;
-  private fs: Pick<typeof fs, "existsSync" | "mkdirSync" | "appendFileSync">;
+  private fs: Pick<typeof fs, "existsSync" | "mkdirSync">;
+  private createWriteStream: CreateWriteStream;
+  private stream: LogStream | null = null;
   private path: Pick<typeof path, "join">;
   private env: NodeJS.ProcessEnv;
   private nowFn: () => Date;
@@ -20,7 +31,8 @@ export class WebSocketLogger {
   private logger: { error: (...args: unknown[]) => void };
 
   constructor(deps: {
-    fs?: Pick<typeof fs, "existsSync" | "mkdirSync" | "appendFileSync">;
+    fs?: Pick<typeof fs, "existsSync" | "mkdirSync">;
+    createWriteStream?: CreateWriteStream;
     path?: Pick<typeof path, "join">;
     env?: NodeJS.ProcessEnv;
     nowFn?: () => Date;
@@ -28,6 +40,7 @@ export class WebSocketLogger {
     logger?: { error: (...args: unknown[]) => void };
   } = {}) {
     this.fs = deps.fs || fs;
+    this.createWriteStream = deps.createWriteStream || fs.createWriteStream;
     this.path = deps.path || path;
     this.env = deps.env || process.env;
     this.nowFn = deps.nowFn || (() => new Date());
@@ -68,16 +81,42 @@ export class WebSocketLogger {
       // Create log file path
       const logFileName = `ws_session_${this.sessionId}.log`;
       this.logFilePath = this.path.join(wsDir, logFileName);
+
+      const stream = this.createWriteStream(this.logFilePath, { flags: "a" });
+      stream.on("error", (error) => this.handleStreamError(error));
+      this.stream = stream;
       this.enabled = true;
 
-      // Write session header (sync for immediate flush)
       const header = `=== WebSocket Session Started ===\nSession ID: ${this.sessionId}\nTimestamp: ${this.nowFn().toISOString()}\n${"=".repeat(40)}\n\n`;
-      this.fs.appendFileSync(this.logFilePath, header);
+      stream.write(header);
 
       this.logger.error(`[WebSocketLogger] Logging to: ${this.logFilePath}`);
     } catch (error) {
       this.logger.error(`[WebSocketLogger] Failed to initialize: ${error}`);
       this.enabled = false;
+      this.stream = null;
+    }
+  }
+
+  /**
+   * Disable logging after a stream failure. Never throws into socket handlers.
+   */
+  private handleStreamError(error: unknown): void {
+    const wasEnabled = this.enabled;
+    this.enabled = false;
+    this.logFilePath = null;
+    this.stream = null;
+    if (wasEnabled) {
+      this.logger.error(`[WebSocketLogger] Write failed, logging disabled: ${error}`);
+    }
+  }
+
+  private writeEntry(entry: string): void {
+    if (!this.stream) return;
+    try {
+      this.stream.write(entry);
+    } catch (error) {
+      this.handleStreamError(error);
     }
   }
 
@@ -91,7 +130,7 @@ export class WebSocketLogger {
     const timestamp = this.nowFn().toISOString();
     const entry = `[${timestamp}] >>> OUTBOUND >>>\n${msgStr}\n\n`;
 
-    this.fs.appendFileSync(this.logFilePath, entry);
+    this.writeEntry(entry);
   }
 
   /**
@@ -104,7 +143,7 @@ export class WebSocketLogger {
     const timestamp = this.nowFn().toISOString();
     const entry = `[${timestamp}] <<< INBOUND <<<\n${msgStr}\n\n`;
 
-    this.fs.appendFileSync(this.logFilePath, entry);
+    this.writeEntry(entry);
   }
 
   /**
@@ -120,9 +159,15 @@ export class WebSocketLogger {
   close(): void {
     if (this.enabled && this.logFilePath) {
       const footer = `\n${"=".repeat(40)}\n=== WebSocket Session Ended ===\nTimestamp: ${this.nowFn().toISOString()}\n`;
-      this.fs.appendFileSync(this.logFilePath, footer);
+      const stream = this.stream;
       this.logFilePath = null;
       this.enabled = false;
+      this.stream = null;
+      try {
+        stream?.end(footer);
+      } catch (error) {
+        this.logger.error(`[WebSocketLogger] Failed to close: ${error}`);
+      }
     }
   }
 }
