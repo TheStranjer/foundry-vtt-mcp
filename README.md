@@ -82,6 +82,21 @@ Override the default credentials path by setting:
 export FOUNDRY_CREDENTIALS=/path/to/credentials.json
 ```
 
+### WebSocket Logging
+
+Set `WEBSOCKETS_DIRECTORY` to log every WebSocket frame, in full, to `ws_session_<id>.log` files in that directory (one per process start). Logging is off when it is unset. Two optional variables cap the log:
+
+- `WEBSOCKETS_MAX_FILES` - Maximum number of `ws_session_*.log` files kept in the directory. Defaults to `1000`. Whenever a new file is opened, the oldest files beyond the limit are deleted (ordered by the timestamp in the file name, then by modification time). Other files in the directory are never touched, and neither is the file being written.
+- `WEBSOCKETS_MAX_FILE_BYTES` - Maximum size of one log file. Defaults to `10485760` (10 MB). When the next entry would push the file past the limit, the session continues in `ws_session_<id>_part2.log`, `_part3`, and so on, each with a short header. Entries are never split: a single entry larger than the limit gets a part file to itself. Part files count toward `WEBSOCKETS_MAX_FILES`.
+
+A missing, non-numeric or non-positive value falls back to its default, with a warning on stderr.
+
+```bash
+export WEBSOCKETS_DIRECTORY=/path/to/ws-logs
+export WEBSOCKETS_MAX_FILES=500
+export WEBSOCKETS_MAX_FILE_BYTES=5242880
+```
+
 ## Usage with MCP Clients
 
 Add to your MCP client configuration:
