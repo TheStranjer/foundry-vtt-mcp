@@ -45,7 +45,7 @@ Returns `{ total, offset, returned, next_offset, documents }` (`next_offset` is 
 - `limit` (int): Page size (default 100, max 1000)
 - `offset` (int): Documents to skip (default 0); pass `next_offset` for the next page
 - `max_length` (int): Byte budget for the page's documents (default 200000; `0` = no limit). If the first document alone exceeds it, `documents` is empty and `oversized` `{ _id, name, bytes }` names it; fetch it with `requested_fields` or `get_document`
-- `requested_fields` (string[]): Fields to return (always includes `_id`, `name`). Omitted/empty returns summary fields only (`_id`, `name`, `type`, `folder`; messages `timestamp`, `speaker.alias`, `author`; settings `key`; users `role`). `["*"]` returns full documents
+- `requested_fields` (string[]): Fields to return (always includes `_id`, `name`). Omitted/empty returns summary fields only (`_id`, `name`, `type`, `folder`, `folder_name`; messages `timestamp` (ISO 8601), `speaker.alias`, `author` (user name), `author_id`, `preview`; settings `key`; users `role`). Explicit fields return raw stored values. `["*"]` returns full documents
 - `where` (object): Filter by field values (AND logic)
 - `sort` (`messages` only): `"newest"` (default) or `"oldest"`, by `timestamp`
 - `pack` (string): Compendium pack `id`; only for `actors`, `items`, `scenes`, `journal`, `macros`, `cards`, `playlists`, `tables` (rejected for the rest)

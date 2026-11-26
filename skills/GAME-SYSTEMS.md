@@ -123,7 +123,7 @@ Actor.system.attributes.*.value
 }
 ```
 
-The response is a page: `{ total, offset, returned, next_offset, documents }`. Without `requested_fields`, only summary fields (`_id`, `name`, `type`, `folder`) come back.
+The response is a page: `{ total, offset, returned, next_offset, documents }`. Without `requested_fields`, only summary fields (`_id`, `name`, `type`, `folder`, `folder_name`) come back; `folder` stays the id, so `where: { folder }` keeps working.
 
 ### Create Token on Scene
 

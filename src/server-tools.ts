@@ -26,13 +26,13 @@ const packProperty = (restriction: string) => ({
 
 export const getDocumentsTool = {
   name: "get_documents",
-  description: `List documents of a collection, one page at a time. Responds { total, offset, returned, next_offset, documents }: total counts after where (when it is 0, where_hint lists the values that exist per where key), next_offset is the next page's offset (null when done). Documents hold summary fields unless requested_fields is given (["*"] = full). If the page's first document exceeds max_length, documents is empty and oversized gives its _id, name and bytes; fetch it with get_document.`,
+  description: `List documents of a collection, one page at a time. Responds { total, offset, returned, next_offset, documents }: total counts after where (when it is 0, where_hint lists the values that exist per where key), next_offset is the next page's offset (null when done). Documents hold readable summary fields unless requested_fields is given (["*"] = full; explicit fields are returned raw, as stored). Summaries add folder_name next to folder, and messages show author as the user name (author_id keeps the id), timestamp as ISO 8601 UTC and a preview of the text. If the page's first document exceeds max_length, documents is empty and oversized gives its _id, name and bytes; fetch it with get_document.`,
   inputSchema: {
     type: "object",
     properties: {
       collection: collectionProperty,
       requested_fields: requestedFieldsProperty(
-        `If empty, only summary fields come back (usually _id, name, type, folder; messages: _id, timestamp, speaker.alias, author; settings: _id, key; users: _id, name, role). ["*"] returns full documents.`
+        `If empty, only summary fields come back (usually _id, name, type, folder, folder_name; messages: _id, timestamp (ISO), speaker.alias, author (name), author_id, preview; settings: _id, key; users: _id, name, role). ["*"] returns full documents.`
       ),
       where: {
         type: "object",
