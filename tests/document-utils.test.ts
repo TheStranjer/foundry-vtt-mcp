@@ -249,3 +249,22 @@ describe("document utils", () => {
       .toEqual([{ type: "npc", folder: "f1" }]);
   });
 });
+
+import { buildIndexFields } from "../src/core/collections.js";
+
+describe("buildIndexFields", () => {
+  test("returns null without requested fields", () => {
+    expect(buildIndexFields(null)).toBeNull();
+    expect(buildIndexFields(undefined, { type: "npc" })).toBeNull();
+    expect(buildIndexFields([], { type: "npc" })).toBeNull();
+  });
+
+  test("adds _id, name and where keys without duplicates", () => {
+    expect(buildIndexFields(["name", "system.hp"], { type: "npc", "system.hp": 1 })).toEqual([
+      "_id",
+      "name",
+      "system.hp",
+      "type",
+    ]);
+  });
+});
