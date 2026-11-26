@@ -21,6 +21,7 @@ import {
   buildEmitMessage,
   engineReplyFor,
   isEngineHandshake,
+  isManageCompendiumEvent,
   isSessionEvent,
   parseAckMessage,
   parseSessionPayload,
@@ -36,7 +37,7 @@ import {
   extractSessionIdFromCookies,
   parseJoinResponse,
 } from "./core/session.js";
-import { filterWorldData } from "./core/world.js";
+import { buildWorldSnapshot, filterWorldData, type WorldSnapshot } from "./core/world.js";
 import {
   type JoinUser,
   hasCompleteUserIdentity,
@@ -60,14 +61,14 @@ interface LoginResult {
   ws: WebSocket;
 }
 
-interface SlimModule {
-  id: unknown;
-  title?: unknown;
-  description?: unknown;
-  authors?: unknown[];
-  url?: unknown;
-  version?: unknown;
-}
+/** Keys the world snapshot leaves out of `world`: document collections plus bulky system data. */
+const WORLD_SNAPSHOT_DROPPED_KEYS = [
+  ...Object.keys(COLLECTION_DOCUMENT_NAMES),
+  "packs",
+  "model",
+  "template",
+  "system",
+];
 
 /** Waits between reconnection attempts; the last one repeats until the client is back. */
 const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000, 30000, 60000];
@@ -139,6 +140,12 @@ export class FoundryClient {
   private ackDispatchers = new WeakMap<WebSocket, AckDispatcher>();
   private credentials: FoundryCredential[] = [];
   private activeCredentialIndex: number = -1;
+  /** The slimmed world for the current connection, or null until fetched / after invalidation. */
+  private worldSnapshot: WorldSnapshot | null = null;
+  /** The world fetch in flight; concurrent callers share it. */
+  private worldSnapshotFetch: Promise<WorldSnapshot> | null = null;
+  /** Bumped on every invalidation so a fetch that began earlier cannot store stale data. */
+  private worldSnapshotEpoch = 0;
   private wsLogger: WebSocketLogger;
   private fs: Pick<typeof fs, "readFileSync">;
   private https: Pick<typeof https, "request">;
@@ -447,6 +454,12 @@ export class FoundryClient {
       if (this.answerEngineFrame(ws, message)) return;
 
       if (acks.dispatch(message)) return;
+
+      if (isManageCompendiumEvent(message)) {
+        // Another client created or deleted a compendium: the cached pack list is stale.
+        this.invalidateWorldSnapshot();
+        return;
+      }
 
       if (isSessionEvent(message)) {
         this.logger.error("[FoundryClient] Received session event, connection ready");
@@ -872,6 +885,7 @@ export class FoundryClient {
     }
 
     connection.ws = ws;
+    this.invalidateWorldSnapshot();
     connection.sessionId = sessionId;
     connection.generation = generation;
     this.logger.error("[FoundryClient] Reconnection successful");
@@ -907,6 +921,7 @@ export class FoundryClient {
         }
 
         // Store the successful connection
+        this.invalidateWorldSnapshot();
         this.connection = {
           hostname,
           credential: login.credential,
@@ -949,6 +964,8 @@ export class FoundryClient {
 
     this.logger.error(`[FoundryClient] Connecting to instance: ${credential._id} (${hostname})...`);
 
+    this.invalidateWorldSnapshot();
+
     // Disconnect existing connection if any
     if (this.connection) {
       this.connection.ws.close();
@@ -966,6 +983,7 @@ export class FoundryClient {
       throw new Error(`Authentication failed for ${hostname}`);
     }
 
+    this.invalidateWorldSnapshot();
     this.connection = {
       hostname,
       credential: login.credential,
@@ -1038,6 +1056,40 @@ export class FoundryClient {
       timeoutMessage: "Timeout waiting for world data (30s)",
     });
     return payload[0] as Record<string, unknown>;
+  }
+
+  /** Drop the cached world, and make any fetch already in flight discard its result. */
+  private invalidateWorldSnapshot(): void {
+    this.worldSnapshotEpoch++;
+    this.worldSnapshot = null;
+    this.worldSnapshotFetch = null;
+  }
+
+  /**
+   * The slimmed world for this connection. The first call fetches the world and keeps only the
+   * metadata and pack list; later calls are served from that, and concurrent first calls share
+   * one request. A failed fetch is not cached.
+   */
+  private loadWorldSnapshot(): Promise<WorldSnapshot> {
+    if (this.worldSnapshot) return Promise.resolve(this.worldSnapshot);
+    if (this.worldSnapshotFetch) return this.worldSnapshotFetch;
+
+    const epoch = this.worldSnapshotEpoch;
+    const fetch: Promise<WorldSnapshot> = this.requestWorldData()
+      .then((worldData) => {
+        const snapshot = buildWorldSnapshot(worldData, WORLD_SNAPSHOT_DROPPED_KEYS);
+        if (epoch === this.worldSnapshotEpoch) {
+          this.worldSnapshot = snapshot;
+        }
+        return snapshot;
+      })
+      .finally(() => {
+        if (this.worldSnapshotFetch === fetch) {
+          this.worldSnapshotFetch = null;
+        }
+      });
+    this.worldSnapshotFetch = fetch;
+    return fetch;
   }
 
   private async sendModifyDocumentRequest(
@@ -1163,8 +1215,8 @@ export class FoundryClient {
    * @returns Pack summaries (id, label, type, package)
    */
   async getCompendiums(options?: { type?: string | null }): Promise<PackSummary[]> {
-    const worldData = await this.requestWorldData();
-    return summarizePacks(worldData.packs, options?.type ?? null);
+    const snapshot = await this.loadWorldSnapshot();
+    return summarizePacks(snapshot.packs, options?.type ?? null);
   }
 
   /**
@@ -1188,8 +1240,8 @@ export class FoundryClient {
       where?: Record<string, unknown> | null;
     }
   ): Promise<Record<string, unknown>[]> {
-    const worldData = await this.requestWorldData();
-    const packError = validatePackAccess(worldData.packs, pack, documentName);
+    const snapshot = await this.loadWorldSnapshot();
+    const packError = validatePackAccess(snapshot.packs, pack, documentName);
     if (packError) {
       throw new Error(packError);
     }
@@ -1413,20 +1465,8 @@ export class FoundryClient {
    * @returns The world data with the specified collections removed
    */
   async getWorld(excludeCollections: string[]): Promise<Record<string, unknown>> {
-    const worldData = await this.requestWorldData();
-
-    if (Array.isArray(worldData.modules)) {
-      worldData.modules = (worldData.modules as Record<string, unknown>[]).map((item): SlimModule => ({
-        id: item.id,
-        title: item.title,
-        description: item.description,
-        authors: item.authors as unknown[] | undefined,
-        url: item.url,
-        version: item.version,
-      }));
-    }
-
-    return filterWorldData(worldData, excludeCollections);
+    const snapshot = await this.loadWorldSnapshot();
+    return filterWorldData(snapshot.world, excludeCollections);
   }
 
   /**
@@ -1754,6 +1794,8 @@ export class FoundryClient {
       throw new Error(`${failure}: ${responseData.error}`);
     }
 
+    // The pack list changed; the next read fetches it again.
+    this.invalidateWorldSnapshot();
     return responseData;
   }
 
@@ -1762,6 +1804,7 @@ export class FoundryClient {
    */
   disconnect(): void {
     this.cancelRetry();
+    this.invalidateWorldSnapshot();
     if (this.connection) {
       this.connection.ws.close();
       this.connection = null;
