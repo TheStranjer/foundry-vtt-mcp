@@ -141,7 +141,7 @@ Lists the documents of a collection from the connected world, one page at a time
 - `limit` (integer, optional): Page size. Defaults to 100, maximum 1000.
 - `offset` (integer, optional): Number of documents to skip. Defaults to 0. Pass `next_offset` from the previous response to read the next page.
 - `max_length` (integer, optional): Byte budget for the page's documents. Defaults to 200000; `0` means no limit. The page is filled in order and stops at the first document that does not fit (`next_offset` points at it). If the page's first document alone exceeds the budget, `documents` is empty and `oversized` (`{ _id, name, bytes }`) names it, with a hint to fetch it using `requested_fields` or `get_document`.
-- `requested_fields` (string[], optional): Specific fields to include. Supports dot-notation for nested fields (e.g. `system.attributes.hp`). Always includes `_id` and `name`. If omitted or empty, only summary fields are returned: `_id`, `name`, `type`, `folder` by default; `_id`, `timestamp`, `speaker.alias`, `author` for messages; `_id`, `key` for settings; `_id`, `name`, `role` for users. Use `["*"]` for full documents. See [Selecting nested fields](#selecting-nested-fields) below.
+- `requested_fields` (string[], optional): Specific fields to include. Supports dot-notation for nested fields (e.g. `system.attributes.hp`). Always includes `_id` and `name`. If omitted or empty, only summary fields are returned: `_id`, `name`, `type`, `folder`, `folder_name` by default; `_id`, `timestamp`, `speaker.alias`, `author`, `author_id`, `preview` for messages; `_id`, `key` for settings; `_id`, `name`, `role` for users. Use `["*"]` for full documents. See [Selecting nested fields](#selecting-nested-fields) below.
 - `sort` (string, optional, `messages` only): `"newest"` (default) or `"oldest"`, ordered by `timestamp`.
 - `where` (object, optional): Filter documents by field values. See [Filtering with `where`](#filtering-with-where) below.
 - `pack` (string, optional): Read from a compendium pack instead of the world (e.g. `my-module.items`). Only available for `actors`, `items`, `scenes`, `journal`, `macros`, `cards`, `playlists` and `tables` (other collections are rejected), and the pack must hold that document type. Use [`get_compendiums`](#get_compendiums) to find pack IDs. `limit`, `offset`, `max_length`, `requested_fields` and `where` work the same way on compendium results.
@@ -381,6 +381,16 @@ List tools never return a whole large collection at once. Each response is one p
 ```
 
 `max_length` is a byte budget for the page's documents. The page is filled in order and ends at the first document that does not fit, so a smaller budget gives shorter pages, never missing documents: keep following `next_offset`. If the first document alone is over the budget, you get `documents: []` plus `oversized` (`_id`, `name`, `bytes`) and `next_offset` pointing at that document; fetch it with `requested_fields` or `get_document`, then continue from `offset + 1`. `max_length: 0` removes the budget. Narrowing `requested_fields` shrinks every document, so the two combine well.
+
+The default summary is made readable without extra calls per document (it uses two cached index reads, one for folder names and one for user names, cleared on reconnect, instance switch and our own Folder or User writes):
+
+```json
+{"_id":"4l3PDv08l17E1GbP","timestamp":"2026-11-25T23:36:37.568Z","speaker":{"alias":"Lukas Wyss"},"author":"Lukas Wyss","author_id":"LNmm7BmDPSrUyXdE","preview":"Rolls a stealth check…"}
+```
+
+- Messages: `author` is the user's name (`author_id` keeps the id), `timestamp` is ISO 8601 UTC, and `preview` is the message text with HTML removed, entities decoded and whitespace collapsed, cut to about 120 characters with `…` (omitted when empty).
+- Every world collection with `folder` also returns `folder_name` (omitted when `folder` is `null`); `folder` stays the id. Compendium reads (`pack`) do not add it.
+- With explicit `requested_fields` (including `["*"]`) the raw stored values are returned.
 
 ## How It Works
 

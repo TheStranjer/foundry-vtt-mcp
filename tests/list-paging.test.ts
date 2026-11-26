@@ -318,12 +318,12 @@ describe("message order", () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect((send.mock.calls[0][1] as any)).toMatchObject({
       index: true,
-      indexFields: ["_id", "name", "timestamp", "speaker.alias", "author"],
+      indexFields: ["_id", "name", "timestamp", "speaker.alias", "author", "content"],
       query: {},
     });
     expect(page.documents).toEqual([
-      { _id: "m4", timestamp: 400, speaker: { alias: "D" } },
-      { _id: "m1", timestamp: 300, speaker: { alias: "C" } },
+      { _id: "m4", timestamp: "1970-01-01T00:00:00.400Z", speaker: { alias: "D" } },
+      { _id: "m1", timestamp: "1970-01-01T00:00:00.300Z", speaker: { alias: "C" } },
     ]);
   });
 
@@ -373,10 +373,10 @@ describe("message order", () => {
     const page = await client.getDocuments("messages", { limit: 3, offset: 1 });
     const expected = pageDocuments(
       [
-        { _id: "m4", timestamp: 400, speaker: { alias: "D" } },
-        { _id: "m1", timestamp: 300, speaker: { alias: "C" } },
-        { _id: "m3", timestamp: 200, speaker: { alias: "B" } },
-        { _id: "m2", timestamp: 100, speaker: { alias: "A" } },
+        { _id: "m4", timestamp: "1970-01-01T00:00:00.400Z", speaker: { alias: "D" } },
+        { _id: "m1", timestamp: "1970-01-01T00:00:00.300Z", speaker: { alias: "C" } },
+        { _id: "m3", timestamp: "1970-01-01T00:00:00.200Z", speaker: { alias: "B" } },
+        { _id: "m2", timestamp: "1970-01-01T00:00:00.100Z", speaker: { alias: "A" } },
       ],
       { limit: 3, offset: 1, maxLength: DEFAULT_MAX_LENGTH }
     );
@@ -516,8 +516,9 @@ describe("where_hint on an empty where result", () => {
   test("a non-empty result has no where_hint and costs no extra request", async () => {
     const client = createClient();
     const send = mockIndex(client, actors);
-    const page = await client.getDocuments("actors", { where: { type: "Vampire" } });
-    expect(page.total).toBe(2);
+    // Folderless actors, so the summary needs no folder-name lookup either.
+    const page = await client.getDocuments("actors", { where: { type: "Vampire", folder: null } });
+    expect(page.total).toBe(1);
     expect(page).not.toHaveProperty("where_hint");
     expect(send).toHaveBeenCalledTimes(1);
   });

@@ -9,6 +9,8 @@ export interface DocumentTypeConfig {
   packable: boolean;
   /** Fields a list read returns when `requested_fields` is absent or empty (`["*"]` returns everything). */
   summaryFields: string[];
+  /** Fields fetched for a summary read only to derive summary output; they are not returned themselves. */
+  summaryFetchFields?: string[];
   /** Field a list read can be ordered by (newest/oldest), when the collection has a natural order. */
   sortField?: string;
 }
@@ -28,7 +30,7 @@ export const DOCUMENT_TYPES: DocumentTypeConfig[] = [
   { singular: "playlist", plural: "playlists", collection: "playlists", description: "playlist", documentName: "Playlist", packable: true, summaryFields: ["_id", "name", "folder", "playing"] },
   { singular: "table", plural: "tables", collection: "tables", description: "table", documentName: "RollTable", packable: true, summaryFields: ["_id", "name", "folder"] },
   { singular: "combat", plural: "combats", collection: "combats", description: "combats", documentName: "Combat", packable: false, summaryFields: ["_id", "scene", "round", "turn", "active"] },
-  { singular: "message", plural: "messages", collection: "messages", description: "messages", documentName: "ChatMessage", packable: false, summaryFields: ["_id", "timestamp", "speaker.alias", "author"], sortField: "timestamp" },
+  { singular: "message", plural: "messages", collection: "messages", description: "messages", documentName: "ChatMessage", packable: false, summaryFields: ["_id", "timestamp", "speaker.alias", "author"], summaryFetchFields: ["content"], sortField: "timestamp" },
   { singular: "setting", plural: "settings", collection: "settings", description: "settings", documentName: "Setting", packable: false, summaryFields: ["_id", "key"] },
 ];
 
@@ -97,6 +99,11 @@ export function buildIndexFields(
 /** The summary field set for a world collection (default set for unknown collections). */
 export function summaryFieldsForCollection(collection: string): string[] {
   return DOCUMENT_TYPES.find((config) => config.collection === collection)?.summaryFields ?? DEFAULT_SUMMARY_FIELDS;
+}
+
+/** Extra fields a summary read fetches to derive its output (messages: `content`, for `preview`). */
+export function summaryFetchFieldsForCollection(collection: string): string[] {
+  return DOCUMENT_TYPES.find((config) => config.collection === collection)?.summaryFetchFields ?? [];
 }
 
 /** The summary field set for a Foundry document class name (default set for unknown classes). */

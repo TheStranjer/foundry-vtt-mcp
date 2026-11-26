@@ -39,10 +39,13 @@ import {
   buildIndexFields,
   resolveRequestedFields,
   sortFieldForCollection,
+  summaryFetchFieldsForCollection,
   summaryFieldsForCollection,
   summaryFieldsForDocumentName,
   whereToServerQuery,
 } from "./core/collections.js";
+import { CachedLookup } from "./core/lookup-cache.js";
+import { buildNameMap, summarizeMessage, withFolderName } from "./core/summary-fields.js";
 import { buildDocumentOperation } from "./core/operations.js";
 import {
   buildEmitMessage,
@@ -194,6 +197,10 @@ export class FoundryClient {
   private worldSnapshot: WorldSnapshot | null = null;
   /** The world fetch in flight; concurrent callers share it. */
   private worldSnapshotFetch: Promise<WorldSnapshot> | null = null;
+  /** Folder `_id` to name, from one index read; cleared on reconnect, instance switch and Folder writes. */
+  private folderNames = new CachedLookup<Map<string, string>>();
+  /** User `_id` to name, from one index read; cleared on reconnect, instance switch and User writes. */
+  private userNames = new CachedLookup<Map<string, string>>();
   /** Bumped on every invalidation so a fetch that began earlier cannot store stale data. */
   private worldSnapshotEpoch = 0;
   private wsLogger: WebSocketLogger;
@@ -935,7 +942,7 @@ export class FoundryClient {
     }
 
     connection.ws = ws;
-    this.invalidateWorldSnapshot();
+    this.resetConnectionState();
     connection.sessionId = sessionId;
     connection.generation = generation;
     this.logger.error("[FoundryClient] Reconnection successful");
@@ -971,7 +978,7 @@ export class FoundryClient {
         }
 
         // Store the successful connection
-        this.invalidateWorldSnapshot();
+        this.resetConnectionState();
         this.connection = {
           hostname,
           credential: login.credential,
@@ -1014,7 +1021,7 @@ export class FoundryClient {
 
     this.logger.error(`[FoundryClient] Connecting to instance: ${credential._id} (${hostname})...`);
 
-    this.invalidateWorldSnapshot();
+    this.resetConnectionState();
 
     // Disconnect existing connection if any
     if (this.connection) {
@@ -1033,7 +1040,7 @@ export class FoundryClient {
       throw new Error(`Authentication failed for ${hostname}`);
     }
 
-    this.invalidateWorldSnapshot();
+    this.resetConnectionState();
     this.connection = {
       hostname,
       credential: login.credential,
@@ -1106,6 +1113,13 @@ export class FoundryClient {
       timeoutMessage: "Timeout waiting for world data (30s)",
     });
     return payload[0] as Record<string, unknown>;
+  }
+
+  /** Drop everything cached for the current connection: the world and the folder and user name lookups. */
+  private resetConnectionState(): void {
+    this.invalidateWorldSnapshot();
+    this.folderNames.clear();
+    this.userNames.clear();
   }
 
   /** Drop the cached world, and make any fetch already in flight discard its result. */
@@ -1202,6 +1216,17 @@ export class FoundryClient {
     return this.throwOnFoundryError(await this.sendModifyDocumentRequest(...args));
   }
 
+  /** A world write; the folder and user name lookups are dropped afterwards when it touched them, even if it failed. */
+  private async sendWriteInvalidating(
+    ...args: Parameters<FoundryClient["sendWriteRequest"]>
+  ): Promise<Record<string, unknown>> {
+    try {
+      return await this.sendWriteRequest(...args);
+    } finally {
+      this.invalidateLookupFor(args[0]);
+    }
+  }
+
   private throwOnFoundryError(response: Record<string, unknown>): Record<string, unknown> {
     if (response.error) {
       const error = response.error as { message?: unknown };
@@ -1239,14 +1264,23 @@ export class FoundryClient {
     const where = options?.where ?? null;
     const sortField = sortFieldForCollection(collection);
 
+    // Only the default summary is made readable; explicit requested_fields stay as stored.
+    const isSummary = fields !== null && !options?.requestedFields?.length;
+    const fetchFields = isSummary && fields ? [...fields, ...summaryFetchFieldsForCollection(collection)] : fields;
+    const readable = isSummary
+      ? (docs: Record<string, unknown>[]) => this.makeSummaryReadable(collection, docs)
+      : null;
+
     let page: DocumentPage;
     if (sortField) {
-      page = await this.getSortedPage(collection, sortField, options?.sort ?? "newest", fields, where, params);
+      page = await this.getSortedPage(collection, sortField, options?.sort ?? "newest", fetchFields, where, params, readable);
     } else {
       const serverQuery = whereToServerQuery(where);
-      if (fields) {
-        const docs = await this.queryWorldDocuments(collection, serverQuery, buildIndexFields(fields, where));
-        page = pageDocuments(shapeDocuments(docs, { where, requestedFields: fields }), params);
+      if (fetchFields) {
+        const docs = await this.queryWorldDocuments(collection, serverQuery, buildIndexFields(fetchFields, where));
+        const shaped = shapeDocuments(docs, { where, requestedFields: fetchFields });
+        const candidates = shaped.slice(params.offset, params.offset + params.limit);
+        page = buildPage(readable ? await readable(candidates) : candidates, shaped.length, params.offset, params.maxLength);
       } else {
         // Full documents: index the collection, then fetch only the page's documents.
         const index = await this.queryWorldDocuments(collection, serverQuery, buildIndexFields(["_id"], where));
@@ -1276,6 +1310,37 @@ export class FoundryClient {
   }
 
   /**
+   * Make a default summary page readable using cached lookups, never per-document requests:
+   * messages get the author's name, an ISO timestamp and a preview; documents with a `folder`
+   * get `folder_name`. A lookup is only requested when the page has something to resolve.
+   */
+  private async makeSummaryReadable(
+    collection: string,
+    docs: Record<string, unknown>[]
+  ): Promise<Record<string, unknown>[]> {
+    let result = docs;
+    if (collection === "messages") {
+      const users = docs.some((doc) => typeof doc.author === "string")
+        ? await this.userNames.get(async () => buildNameMap(await this.queryWorldDocuments("users", {}, ["_id", "name"])))
+        : new Map<string, string>();
+      result = result.map((doc) => summarizeMessage(doc, users));
+    }
+    if (summaryFieldsForCollection(collection).includes("folder")) {
+      const folders = docs.some((doc) => typeof doc.folder === "string")
+        ? await this.folderNames.get(async () => buildNameMap(await this.queryWorldDocuments("folders", {}, ["_id", "name"])))
+        : new Map<string, string>();
+      result = result.map((doc) => withFolderName(doc, folders));
+    }
+    return result;
+  }
+
+  /** A world write changed a document type whose names are cached: drop that lookup. */
+  private invalidateLookupFor(type: string): void {
+    if (type === "Folder") this.folderNames.clear();
+    if (type === "User") this.userNames.clear();
+  }
+
+  /**
    * One page of a collection ordered by `sortField` (Foundry returns documents in _id order).
    *
    * With a field list (summary fields or explicit `requested_fields`), one indexed request
@@ -1293,7 +1358,8 @@ export class FoundryClient {
     sort: "newest" | "oldest",
     fields: string[] | null,
     where: Record<string, unknown> | null,
-    params: PageParams
+    params: PageParams,
+    readable: ((docs: Record<string, unknown>[]) => Promise<Record<string, unknown>[]>) | null = null
   ): Promise<DocumentPage> {
     const ascending = sort === "oldest";
     const serverQuery = whereToServerQuery(where);
@@ -1305,9 +1371,10 @@ export class FoundryClient {
         buildIndexFields([sortField, ...fields], where)
       );
       const sorted = sortDocuments(filterDocumentsByWhere(rows, where), sortField, ascending);
-      const documents = sorted
+      const candidates = sorted
         .slice(params.offset, params.offset + params.limit)
         .map((doc) => filterDocumentFields(doc, fields));
+      const documents = readable ? await readable(candidates) : candidates;
       return buildPage(documents, sorted.length, params.offset, params.maxLength);
     }
 
@@ -1573,7 +1640,7 @@ export class FoundryClient {
       options
     );
 
-    return this.sendWriteRequest(
+    return this.sendWriteInvalidating(
       type,
       "update",
       operation,
@@ -1619,7 +1686,7 @@ export class FoundryClient {
       options
     );
 
-    return this.sendWriteRequest(
+    return this.sendWriteInvalidating(
       type,
       "create",
       operation,
@@ -1655,7 +1722,7 @@ export class FoundryClient {
       options
     );
 
-    return this.sendWriteRequest(
+    return this.sendWriteInvalidating(
       type,
       "delete",
       operation,
@@ -2021,7 +2088,7 @@ export class FoundryClient {
    */
   disconnect(): void {
     this.cancelRetry();
-    this.invalidateWorldSnapshot();
+    this.resetConnectionState();
     if (this.connection) {
       this.connection.ws.close();
       this.connection = null;
