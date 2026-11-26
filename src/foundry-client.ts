@@ -698,14 +698,12 @@ export class FoundryClient {
         );
 
         // Step 4: Establish WebSocket connection and wait for the game session to bind
-        const ws = await this.connectWebSocket(
+        const ws = await this.openBoundSocket(
           hostname,
           sessionId,
           generation,
           credential.allow_insecure_tls
         );
-        this.setupWebSocketHandlers(ws);
-        await this.waitForGameSession(ws);
 
         // Store the successful connection
         this.connection = {
@@ -774,14 +772,12 @@ export class FoundryClient {
       hostname,
       credential.allow_insecure_tls
     );
-    const ws = await this.connectWebSocket(
+    const ws = await this.openBoundSocket(
       hostname,
       sessionId,
       generation,
       credential.allow_insecure_tls
     );
-    this.setupWebSocketHandlers(ws);
-    await this.waitForGameSession(ws);
 
     this.connection = {
       hostname,

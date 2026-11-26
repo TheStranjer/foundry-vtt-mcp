@@ -338,3 +338,78 @@ describe("a server that accepts a request and goes silent", () => {
     expect(client.reconnectAttempt).toBeNull();
   });
 });
+
+describe("connect() and chooseFoundryInstance() close sockets that fail to bind", () => {
+  const NULL_SESSION_FRAME = Buffer.from('42["session",null]');
+  const creds = [
+    { _id: "a", hostname: "a", password: "p", userid: "u", username: "n" },
+    { _id: "b", hostname: "b", password: "p", userid: "u", username: "n" },
+  ];
+
+  /** Real waitForGameSession; `answer` decides what each fake socket says once connected. */
+  function bindingClient(sockets: TestWebSocket[], answer: (ws: TestWebSocket) => void) {
+    const client = createClient({
+      fs: { readFileSync: jest.fn(() => JSON.stringify(creds)) },
+      // The "10s" bind timeout fires on the next tick, and is cancelled like a real timer.
+      setTimeoutFn: (fn: () => void) => setImmediate(fn),
+      clearTimeoutFn: (handle: NodeJS.Immediate) => clearImmediate(handle),
+    });
+    jest.spyOn(client, "getSession").mockResolvedValue("sid");
+    jest.spyOn(client, "authenticate").mockResolvedValue(true);
+    jest.spyOn(client, "detectGeneration").mockResolvedValue(14);
+    let next = 0;
+    jest.spyOn(client, "connectWebSocket").mockImplementation(async () => {
+      const ws = sockets[next++];
+      setImmediate(() => answer(ws));
+      return ws;
+    });
+    return client;
+  }
+
+  const nullSession = (ws: TestWebSocket) => ws.emit("message", NULL_SESSION_FRAME);
+  const silence = () => undefined;
+
+  test("connect: a null session closes the socket and the next credential is tried", async () => {
+    const sockets = [new TestWebSocket(), new TestWebSocket()];
+    const client = bindingClient(sockets, (ws) =>
+      ws === sockets[0] ? nullSession(ws) : ws.emit("message", Buffer.from('42["session",{"sessionId":"s","userId":"u"}]'))
+    );
+
+    await client.connect();
+
+    expect(sockets[0].close).toHaveBeenCalled();
+    expect(sockets[1].close).not.toHaveBeenCalled();
+    expect(client.getHostname()).toBe("b");
+  });
+
+  test("connect: a bind timeout closes the socket and the next credential is tried", async () => {
+    const sockets = [new TestWebSocket(), new TestWebSocket()];
+    const client = bindingClient(sockets, silence);
+
+    await expect(client.connect()).rejects.toThrow("Failed to connect to any Foundry server");
+
+    expect(sockets[0].close).toHaveBeenCalled();
+    expect(sockets[1].close).toHaveBeenCalled();
+    expect(client.connectWebSocket).toHaveBeenCalledTimes(2);
+  });
+
+  test("chooseFoundryInstance: a null session closes the socket and rejects", async () => {
+    const sockets = [new TestWebSocket()];
+    const client = bindingClient(sockets, nullSession);
+
+    await expect(client.chooseFoundryInstance({ item_order: 0 })).rejects.toThrow("null session");
+
+    expect(sockets[0].close).toHaveBeenCalled();
+    expect(client.connection).toBeNull();
+  });
+
+  test("chooseFoundryInstance: a bind timeout closes the socket and rejects", async () => {
+    const sockets = [new TestWebSocket()];
+    const client = bindingClient(sockets, silence);
+
+    await expect(client.chooseFoundryInstance({ item_order: 0 })).rejects.toThrow("Timed out");
+
+    expect(sockets[0].close).toHaveBeenCalled();
+    expect(client.connection).toBeNull();
+  });
+});
