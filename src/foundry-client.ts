@@ -900,13 +900,6 @@ export class FoundryClient {
   }
 
   /**
-   * Get the WebSocket instance
-   */
-  getWebSocket(): WebSocket | null {
-    return this.connection?.ws || null;
-  }
-
-  /**
    * Get the connected hostname
    */
   getHostname(): string | null {
@@ -931,9 +924,6 @@ export class FoundryClient {
     this.sendWebSocketMessage(this.connection.ws, data);
   }
 
-  /**
-   * Filter document object to only include requested fields (always includes _id and name)
-   */
   /**
    * Request world data from Foundry
    * This is the generic method that handles the WebSocket communication pattern.
@@ -1100,19 +1090,6 @@ export class FoundryClient {
     return response;
   }
 
-  /** Valid document collection names in FoundryVTT */
-  static readonly DOCUMENT_COLLECTIONS = ["actors", "items", "folders", "users", "scenes", "journal"] as const;
-
-  /**
-   * Filter documents by a where clause (AND logic for all key-value pairs)
-   */
-  private filterDocumentsByWhere(
-    docs: Record<string, unknown>[],
-    where: Record<string, unknown> | null
-  ): Record<string, unknown>[] {
-    return filterDocumentsByWhere(docs, where);
-  }
-
   /**
    * Request documents from a specific collection in the world
    * @param collection - The collection name (actors, items, folders, users, scenes, journal)
@@ -1136,7 +1113,7 @@ export class FoundryClient {
     const docs = await this.queryWorldDocuments(collection, whereToServerQuery(where));
 
     // Apply where filter first
-    let filteredDocs = this.filterDocumentsByWhere(docs, where);
+    let filteredDocs = filterDocumentsByWhere(docs, where);
 
     // Filter fields for each document
     filteredDocs = filteredDocs.map((doc) =>
@@ -1242,7 +1219,7 @@ export class FoundryClient {
     );
 
     const docs = (response.result as Record<string, unknown>[] | undefined) ?? [];
-    let filteredDocs = this.filterDocumentsByWhere(docs, options?.where ?? null);
+    let filteredDocs = filterDocumentsByWhere(docs, options?.where ?? null);
     filteredDocs = filteredDocs.map((doc) =>
       filterDocumentFields(doc, options?.requestedFields ?? null)
     );
@@ -1444,55 +1421,6 @@ export class FoundryClient {
       },
       "deleteDocument"
     );
-  }
-
-  // Convenience methods for specific document types
-  async getActors(options?: { maxLength?: number | null; requestedFields?: string[] | null }) {
-    return this.getDocuments("actors", options);
-  }
-
-  async getActor(identifier: { id?: string; _id?: string; name?: string }, options?: { requestedFields?: string[] | null }) {
-    return this.getDocument("actors", identifier, options);
-  }
-
-  async getItems(options?: { maxLength?: number | null; requestedFields?: string[] | null }) {
-    return this.getDocuments("items", options);
-  }
-
-  async getItem(identifier: { id?: string; _id?: string; name?: string }, options?: { requestedFields?: string[] | null }) {
-    return this.getDocument("items", identifier, options);
-  }
-
-  async getFolders(options?: { maxLength?: number | null; requestedFields?: string[] | null }) {
-    return this.getDocuments("folders", options);
-  }
-
-  async getFolder(identifier: { id?: string; _id?: string; name?: string }, options?: { requestedFields?: string[] | null }) {
-    return this.getDocument("folders", identifier, options);
-  }
-
-  async getUsers(options?: { maxLength?: number | null; requestedFields?: string[] | null }) {
-    return this.getDocuments("users", options);
-  }
-
-  async getUser(identifier: { id?: string; _id?: string; name?: string }, options?: { requestedFields?: string[] | null }) {
-    return this.getDocument("users", identifier, options);
-  }
-
-  async getScenes(options?: { maxLength?: number | null; requestedFields?: string[] | null }) {
-    return this.getDocuments("scenes", options);
-  }
-
-  async getScene(identifier: { id?: string; _id?: string; name?: string }, options?: { requestedFields?: string[] | null }) {
-    return this.getDocument("scenes", identifier, options);
-  }
-
-  async getJournals(options?: { maxLength?: number | null; requestedFields?: string[] | null }) {
-    return this.getDocuments("journal", options);
-  }
-
-  async getJournal(identifier: { id?: string; _id?: string; name?: string }, options?: { requestedFields?: string[] | null }) {
-    return this.getDocument("journal", identifier, options);
   }
 
   /**
@@ -1839,13 +1767,6 @@ export class FoundryClient {
       this.logger.error(`[FoundryClient] Sending browseFiles: ${messageStr}`);
       this.sendWebSocketMessage(ws, messageStr);
     });
-  }
-
-  /**
-   * Get the session ID for the current connection
-   */
-  getSessionId(): string | null {
-    return this.connection?.sessionId || null;
   }
 
   /**

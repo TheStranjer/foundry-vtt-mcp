@@ -57,16 +57,14 @@ describe("WebSocketLogger", () => {
     logger.logInbound("in");
     logger.close();
 
-    expect(logger.isEnabled()).toBe(false);
     expect(createWriteStream).not.toHaveBeenCalled();
   });
 
   test("creates directory and opens an append-mode stream with header", () => {
-    const { logger, createWriteStream, writes } = build({
+    const { createWriteStream, writes } = build({
       fs: { existsSync: jest.fn(() => false), mkdirSync: jest.fn() },
     });
 
-    expect(logger.isEnabled()).toBe(true);
     expect(createWriteStream).toHaveBeenCalledTimes(1);
     const [filePath, options] = createWriteStream.mock.calls[0] as unknown as [string, object];
     expect(filePath).toMatch(/^\/tmp\/ws\/ws_session_.+\.log$/);
@@ -102,7 +100,6 @@ describe("WebSocketLogger", () => {
     logger.logOutbound("late");
     logger.close();
 
-    expect(logger.isEnabled()).toBe(false);
     expect(stream.end).toHaveBeenCalledTimes(1);
     expect(writes[writes.length - 1]).toBe(
       `\n${"=".repeat(40)}\n=== WebSocket Session Ended ===\nTimestamp: 2020-01-01T00:00:00.000Z\n`,
@@ -119,7 +116,6 @@ describe("WebSocketLogger", () => {
     expect(() => logger.logOutbound("x")).not.toThrow();
     expect(() => logger.close()).not.toThrow();
 
-    expect(logger.isEnabled()).toBe(false);
     expect(errorLog).toHaveBeenCalledTimes(1);
     expect(stream.write).toHaveBeenCalledTimes(1); // header only
     expect(stream.end).not.toHaveBeenCalled();
@@ -132,12 +128,13 @@ describe("WebSocketLogger", () => {
     });
 
     expect(() => logger.logInbound("x")).not.toThrow();
-    expect(logger.isEnabled()).toBe(false);
+    logger.logInbound("y");
+    expect(stream.write).toHaveBeenCalledTimes(2); // header + the failed write
   });
 
   test("initialize handles errors", () => {
     const createWriteStream = jest.fn();
-    const logger = new WebSocketLogger({
+    new WebSocketLogger({
       fs: {
         existsSync: jest.fn(() => false),
         mkdirSync: jest.fn(() => {
@@ -150,17 +147,17 @@ describe("WebSocketLogger", () => {
       logger: { error: jest.fn() },
     });
 
-    expect(logger.isEnabled()).toBe(false);
     expect(createWriteStream).not.toHaveBeenCalled();
   });
 
   test("createWriteStream throwing disables logging", () => {
-    const { logger } = build({
+    const { logger, errorLog } = build({
       createWriteStream: () => {
         throw new Error("EACCES");
       },
     });
-    expect(logger.isEnabled()).toBe(false);
+    expect(() => logger.logOutbound("x")).not.toThrow();
+    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("Failed to initialize"));
   });
 });
 
@@ -238,11 +235,12 @@ describe("WebSocketLogger rotation", () => {
   });
 
   test("the active file is never pruned", () => {
-    const { unlinkSync, logger } = rotating({
+    const { unlinkSync, logger, streams } = rotating({
       env: { WEBSOCKETS_MAX_FILES: "1" },
       files: { [`ws_session_${ts(9)}_old.log`]: 1 },
     });
-    expect(logger.isEnabled()).toBe(true);
+    logger.logOutbound("x");
+    expect(streams[0].writes).toHaveLength(2);
     expect(deleted(unlinkSync)).toEqual([`ws_session_${ts(9)}_old.log`]);
     expect(unlinkSync.mock.calls.every((c) => !(c[0] as string).includes("2020-01-01T00-00-00-000Z"))).toBe(true);
   });
@@ -276,14 +274,14 @@ describe("WebSocketLogger rotation", () => {
   });
 
   test("rollover prunes and keeps the new part", () => {
-    const { logger, unlinkSync } = rotating({
+    const { logger, unlinkSync, streams } = rotating({
       env: { WEBSOCKETS_MAX_FILES: "2", WEBSOCKETS_MAX_FILE_BYTES: "300" },
       files: { [`ws_session_${ts(1)}_old.log`]: 1 },
     });
     unlinkSync.mockClear();
     logger.logOutbound("a".repeat(100));
     logger.logOutbound("b".repeat(200));
-    expect(logger.isEnabled()).toBe(true);
+    expect(streams[1].writes[1]).toContain("b".repeat(200));
     expect(unlinkSync.mock.calls.map((c) => c[0])).not.toContainEqual(expect.stringMatching(/_part2/));
   });
 
@@ -306,7 +304,7 @@ describe("WebSocketLogger rotation", () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("using default 1000");
     logger.logOutbound("a");
-    expect(logger.isEnabled()).toBe(true);
+    expect(streams[0].writes).toHaveLength(2);
     expect(streams).toHaveLength(1);
   });
 
@@ -318,11 +316,12 @@ describe("WebSocketLogger rotation", () => {
   });
 
   test("a failing delete does not disable logging", () => {
-    const { logger, unlinkSync } = rotating({
+    const { logger, unlinkSync, streams } = rotating({
       env: { WEBSOCKETS_MAX_FILES: "1" },
       files: { [`ws_session_${ts(9)}_old.log`]: 1 },
     });
     expect(unlinkSync).toHaveBeenCalled();
-    expect(logger.isEnabled()).toBe(true);
+    logger.logOutbound("x");
+    expect(streams[0].writes).toHaveLength(2);
   });
 });
