@@ -4,99 +4,78 @@ import { DEFAULT_LIMIT, DEFAULT_MAX_LENGTH, MAX_LIMIT } from "./core/document-ut
 
 export { DOCUMENT_TYPES, type DocumentTypeConfig };
 
-function packProperty(config: DocumentTypeConfig) {
-  return config.packable
-    ? {
-        pack: {
-          type: "string",
-          description: `Optional. A compendium pack ID (e.g., "world.my-${config.plural}" or "my-module.${config.plural}"; list them with get_compendiums). If provided, reads ${config.plural} from that compendium instead of the world. The pack must hold ${config.documentName} documents.`,
-        },
-      }
-    : {};
-}
+const COLLECTIONS = DOCUMENT_TYPES.map((config) => config.collection);
+const PACKABLE_COLLECTIONS = DOCUMENT_TYPES.filter((config) => config.packable).map((config) => config.collection);
 
-export function generateListToolDefinition(config: DocumentTypeConfig) {
-  const plural = config.plural;
-  const summary = config.summaryFields.join(", ");
-  const sortProperty = config.sortField
-    ? {
-        sort: {
-          type: "string",
-          enum: ["newest", "oldest"],
-          description: `Order of the ${plural}, by ${config.sortField}: "newest" (default) or "oldest". Paging with offset follows this order.`,
-        },
-      }
-    : {};
-  return {
-    name: `get_${plural}`,
-    description: `List ${plural} from FoundryVTT, one page at a time. Responds with { total, offset, returned, next_offset, documents }: total is the count after the where filter, and next_offset is the offset to pass for the next page (null when nothing is left). By default each document has only summary fields (${summary}); pass requested_fields to choose fields, or ["*"] for full documents. If the first document of a page is larger than max_length, documents is empty and oversized gives its _id, name and bytes; fetch it with requested_fields or get_${config.singular}.`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        limit: {
-          type: "integer",
-          description: `Maximum number of ${plural} in this page. Defaults to ${DEFAULT_LIMIT}; at most ${MAX_LIMIT}.`,
-        },
-        offset: {
-          type: "integer",
-          description: `Number of ${plural} (after the where filter) to skip. Defaults to 0. Use next_offset from the previous response to get the next page.`,
-        },
-        max_length: {
-          type: "integer",
-          description: `Byte budget for this page's documents. Defaults to ${DEFAULT_MAX_LENGTH}. The page is filled in order and stops at the first document that does not fit (next_offset points at it). If the first document alone is over the budget, documents is empty and oversized describes it. 0 means no limit.`,
-        },
-        requested_fields: {
-          type: "array",
-          items: { type: "string" },
-          description: `Array of field names to include in each ${config.description} object. Supports dot-notation for nested fields (e.g. "system.aspirations"), which returns just that nested value under its parent. Always includes _id and name. If empty, undefined, or null, only the summary fields (${summary}) are returned. Use ["*"] to return full documents.`,
-        },
-        where: {
-          type: "object",
-          additionalProperties: true,
-          description: `Filter ${plural} by field values. Provide key-value pairs to match. All conditions must match (AND logic). Example: {"folder": "abc123"} returns only ${plural} in that folder. Example: {"folder": "abc123", "type": "npc"} returns only ${plural} matching both conditions.`,
-        },
-        ...sortProperty,
-        ...packProperty(config),
-      },
-      required: [],
-    },
-  };
-}
+const collectionProperty = {
+  type: "string",
+  enum: COLLECTIONS,
+  description: "The collection to read.",
+};
 
-export function generateGetToolDefinition(config: DocumentTypeConfig) {
-  return {
-    name: `get_${config.singular}`,
-    description: `Get a specific ${config.description} from FoundryVTT by id, _id, or name`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: {
-          type: "string",
-          description: `The id of the ${config.description} to retrieve`,
-        },
-        _id: {
-          type: "string",
-          description: `The _id of the ${config.description} to retrieve`,
-        },
-        name: {
-          type: "string",
-          description: `The name of the ${config.description} to retrieve`,
-        },
-        requested_fields: {
-          type: "array",
-          items: { type: "string" },
-          description: `Array of field names to include in the ${config.description} object. Supports dot-notation for nested fields (e.g. "system.aspirations"), which returns just that nested value under its parent. Always includes _id and name. If empty, undefined, or null (or ["*"]), all fields are included.`,
-        },
-        ...packProperty(config),
+const requestedFieldsProperty = (empty: string) => ({
+  type: "array",
+  items: { type: "string" },
+  description: `Fields to include; dot-notation allowed (e.g. "system.age"). Always includes _id and name. ${empty}`,
+});
+
+const packProperty = (restriction: string) => ({
+  type: "string",
+  description: `Optional compendium pack ID (see get_compendiums); reads from it instead of the world. ${restriction}`,
+});
+
+export const getDocumentsTool = {
+  name: "get_documents",
+  description: `List documents of a collection, one page at a time. Responds { total, offset, returned, next_offset, documents }: total counts after where, next_offset is the next page's offset (null when done). Documents hold summary fields unless requested_fields is given (["*"] = full). If the page's first document exceeds max_length, documents is empty and oversized gives its _id, name and bytes; fetch it with get_document.`,
+  inputSchema: {
+    type: "object",
+    properties: {
+      collection: collectionProperty,
+      requested_fields: requestedFieldsProperty(
+        `If empty, only summary fields come back (usually _id, name, type, folder; messages: _id, timestamp, speaker.alias, author; settings: _id, key; users: _id, name, role). ["*"] returns full documents.`
+      ),
+      where: {
+        type: "object",
+        additionalProperties: true,
+        description: `Match field values (AND), e.g. {"folder":"abc","type":"npc"}.`,
       },
-      required: [],
+      limit: { type: "integer", description: `Page size. Default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}.` },
+      offset: { type: "integer", description: "Documents to skip. Default 0; use next_offset to page." },
+      sort: {
+        type: "string",
+        enum: ["newest", "oldest"],
+        description: `messages only: order by timestamp. Default "newest".`,
+      },
+      max_length: {
+        type: "integer",
+        description: `Byte budget for the page's documents. Default ${DEFAULT_MAX_LENGTH}; 0 = no limit. The page stops at the first document that does not fit.`,
+      },
+      pack: packProperty(`Only for: ${PACKABLE_COLLECTIONS.join(", ")}.`),
     },
-  };
-}
+    required: ["collection"],
+  },
+};
+
+export const getDocumentTool = {
+  name: "get_document",
+  description: `Get one document of a collection by id, _id or name. Returns the full document unless requested_fields is given.`,
+  inputSchema: {
+    type: "object",
+    properties: {
+      collection: collectionProperty,
+      id: { type: "string", description: "Document id." },
+      _id: { type: "string", description: "Document _id." },
+      name: { type: "string", description: "Document name." },
+      requested_fields: requestedFieldsProperty("Empty or [\"*\"] returns all fields."),
+      pack: packProperty("Same collections as in get_documents."),
+    },
+    required: ["collection"],
+  },
+};
 
 export const getCompendiumsTool = {
   name: "get_compendiums",
-  description: `List the compendium packs in FoundryVTT (id, label, document type, owning package). Use a pack's id as the "pack" parameter of the get_* tools to read documents from it.`,
+  description: `List the compendium packs in FoundryVTT (id, label, document type, owning package). Use a pack's id as the "pack" parameter of get_documents or get_document.`,
   inputSchema: {
     type: "object",
     properties: {
@@ -111,13 +90,13 @@ export const getCompendiumsTool = {
 
 export const modifyDocumentTool = {
   name: "modify_document",
-  description: `Modify a document in FoundryVTT. IMPORTANT: Before using this tool, you should first retrieve the document using the appropriate get_* tool (e.g., get_actor, get_item) to understand its current structure and field names. Document schemas vary by game system, so inspecting the document first ensures you use the correct field paths in your updates.`,
+  description: `Modify a document in FoundryVTT. Retrieve it with get_document first: schemas vary by game system, so check the current field paths.`,
   inputSchema: {
     type: "object",
     properties: {
       type: {
         type: "string",
-        description: `The document type to modify. Valid types include: "Actor", "Item", "Scene", "JournalEntry", "Folder", "User", "Playlist", "Macro", "RollTable", "Cards", "ChatMessage", "Combat", "Combatant", "ActiveEffect", "Drawing", "MeasuredTemplate", "Note", "Tile", "Token", "Wall", "AmbientLight", "AmbientSound". The type must match Foundry's internal document class name (case-sensitive).`,
+        description: `The document type to modify. Foundry document class name, case-sensitive (e.g. "Actor", "JournalEntry", "Token").`,
       },
       _id: {
         type: "string",
@@ -129,19 +108,11 @@ export const modifyDocumentTool = {
           type: "object",
           additionalProperties: true,
         },
-        description: `An array of update objects to apply to the document. Each update object should contain the fields you want to modify, using nested objects to represent the document structure. The _id will be automatically added to each update object.
-
-Example: To update an Actor's strength attribute, you might use:
-[{ "system": { "attributes_physical": { "strength": { "value": 5 } } } }]
-
-Example: To update an Item's description and quantity:
-[{ "system": { "description": "A shiny sword", "quantity": 2 } }]
-
-The exact field structure depends on the game system. Use the get_* tools first to inspect the document's current structure and determine the correct field paths.`,
+        description: `Update objects; the _id is added automatically. Field structure depends on the game system, so inspect the document first. Example: [{ "system": { "attributes_physical": { "strength": { "value": 5 } } } }]`,
       },
       parent_uuid: {
         type: "string",
-        description: `Optional. The UUID of the parent document for embedded documents. Required when modifying embedded documents like Drawings, Tokens, Tiles, Walls, etc. that exist within a parent document (e.g., a Scene). Format: "{ParentType}.{parentId}" (e.g., "Scene.vrKkbtn8u66mv1Y9").`,
+        description: `Optional. UUID of the parent document, required for embedded documents (Drawing, Token, Tile, Wall, ...). Format "{ParentType}.{parentId}", e.g. "Scene.vrKkbtn8u66mv1Y9".`,
       },
       pack: {
         type: "string",
@@ -154,13 +125,13 @@ The exact field structure depends on the game system. Use the get_* tools first 
 
 export const createDocumentTool = {
   name: "create_document",
-  description: `Create a new document in FoundryVTT. IMPORTANT: Before using this tool, you should first retrieve an existing document of the same type using the appropriate get_* tool (e.g., get_actor, get_item) to understand the expected schema and field structure. Document schemas vary significantly by game system, so inspecting an existing document first ensures you provide the correct fields when creating a new one.`,
+  description: `Create a new document in FoundryVTT. Retrieve an existing document of the same type with get_document first: schemas vary by game system.`,
   inputSchema: {
     type: "object",
     properties: {
       type: {
         type: "string",
-        description: `The document type to create. Valid types include: "Actor", "Item", "Scene", "JournalEntry", "Folder", "User", "Playlist", "Macro", "RollTable", "Cards", "ChatMessage", "Combat", "Combatant", "ActiveEffect", "Drawing", "MeasuredTemplate", "Note", "Tile", "Token", "Wall", "AmbientLight", "AmbientSound". The type must match Foundry's internal document class name (case-sensitive).`,
+        description: `The document type to create. Foundry document class name, case-sensitive (e.g. "Actor", "JournalEntry", "Token").`,
       },
       data: {
         type: "array",
@@ -168,19 +139,11 @@ export const createDocumentTool = {
           type: "object",
           additionalProperties: true,
         },
-        description: `An array of data objects defining the new documents to create. Each object should contain all required fields for the document type. At minimum, most documents require a "name" field.
-
-Example: To create a simple Item:
-[{ "name": "Healing Potion", "type": "consumable" }]
-
-Example: To create an Actor with some system data:
-[{ "name": "Goblin", "type": "npc", "system": { "attributes": { "hp": { "value": 10, "max": 10 } } } }]
-
-The exact field structure depends on the game system. Use the get_* tools first to retrieve an existing document of the same type to understand the expected schema.`,
+        description: `Data objects for the new documents; most need at least a "name". Field structure depends on the game system, so inspect an existing document first. Example: [{ "name": "Goblin", "type": "npc", "system": { "attributes": { "hp": { "value": 10, "max": 10 } } } }]`,
       },
       parent_uuid: {
         type: "string",
-        description: `Optional. The UUID of the parent document for embedded documents. Required when creating embedded documents like Drawings, Tokens, Tiles, Walls, etc. within a parent document (e.g., a Scene). Format: "{ParentType}.{parentId}" (e.g., "Scene.vrKkbtn8u66mv1Y9").`,
+        description: `Optional. UUID of the parent document, required for embedded documents (Drawing, Token, Tile, Wall, ...). Format "{ParentType}.{parentId}", e.g. "Scene.vrKkbtn8u66mv1Y9".`,
       },
       pack: {
         type: "string",
@@ -193,7 +156,7 @@ The exact field structure depends on the game system. Use the get_* tools first 
 
 export const getWorldTool = {
   name: "get_world",
-  description: `Get world metadata from FoundryVTT. Returns information about the world such as title, system, version, and other metadata. This excludes document collections (actors, items, scenes, etc.) - use the specific get_* tools for those.`,
+  description: `Get world metadata from FoundryVTT. Returns information about the world such as title, system, version, and other metadata. This excludes document collections (actors, items, scenes, etc.) - use get_documents for those.`,
   inputSchema: {
     type: "object",
     properties: {},
@@ -209,24 +172,18 @@ export const deleteDocumentTool = {
     properties: {
       type: {
         type: "string",
-        description: `The document type to delete. Valid types include: "Actor", "Item", "Scene", "JournalEntry", "Folder", "User", "Playlist", "Macro", "RollTable", "Cards", "ChatMessage", "Combat", "Combatant", "ActiveEffect", "Drawing", "MeasuredTemplate", "Note", "Tile", "Token", "Wall", "AmbientLight", "AmbientSound". The type must match Foundry's internal document class name (case-sensitive).`,
+        description: `The document type to delete. Foundry document class name, case-sensitive (e.g. "Actor", "JournalEntry", "Token").`,
       },
       ids: {
         type: "array",
         items: {
           type: "string",
         },
-        description: `An array of document _ids to delete. Each _id is the unique identifier for a document in FoundryVTT.
-
-Example: To delete a single document:
-["vlcf6AI5FaE9qjgJ"]
-
-Example: To delete multiple documents:
-["vlcf6AI5FaE9qjgJ", "abc123def456", "xyz789ghi012"]`,
+        description: `The _ids of the documents to delete, e.g. ["vlcf6AI5FaE9qjgJ", "abc123def456"].`,
       },
       parent_uuid: {
         type: "string",
-        description: `Optional. The UUID of the parent document for embedded documents. Required when deleting embedded documents like Drawings, Tokens, Tiles, Walls, etc. from a parent document (e.g., a Scene). Format: "{ParentType}.{parentId}" (e.g., "Scene.vrKkbtn8u66mv1Y9").`,
+        description: `Optional. UUID of the parent document, required for embedded documents (Drawing, Token, Tile, Wall, ...). Format "{ParentType}.{parentId}", e.g. "Scene.vrKkbtn8u66mv1Y9".`,
       },
       pack: {
         type: "string",
@@ -358,10 +315,8 @@ export const deleteCompendiumTool = {
 
 export function createToolDefinitions() {
   return [
-    ...DOCUMENT_TYPES.flatMap((config) => [
-      generateListToolDefinition(config),
-      generateGetToolDefinition(config),
-    ]),
+    getDocumentsTool,
+    getDocumentTool,
     getWorldTool,
     getCompendiumsTool,
     modifyDocumentTool,
@@ -398,91 +353,103 @@ interface ToolHandlerEntry {
   run: (client: FoundryClient, args: ToolArgs) => Promise<ToolResult> | ToolResult;
 }
 
-function listHandler(config: DocumentTypeConfig): ToolHandlerEntry {
-  return {
-    verb: `fetching ${config.plural}`,
-    run: async (client, args) => {
-      const limit = args?.limit as number | undefined;
-      const offset = args?.offset as number | undefined;
-      const maxLength = args?.max_length as number | undefined;
-      const sort = args?.sort as string | undefined;
-      const requestedFields = args?.requested_fields as string[] | undefined;
-      const where = args?.where as Record<string, unknown> | undefined;
-      const pack = args?.pack as string | undefined;
+function resolveConfig(args: ToolArgs): DocumentTypeConfig | ToolResult {
+  const collection = args?.collection;
+  const config = DOCUMENT_TYPES.find((c) => c.collection === collection);
+  return config ?? errorResponse(`Error: 'collection' must be one of: ${COLLECTIONS.join(", ")}`);
+}
 
-      if (pack && !config.packable) {
-        return errorResponse(`Error: ${config.plural} cannot be stored in a compendium`);
-      }
+function isToolResult(value: DocumentTypeConfig | ToolResult): value is ToolResult {
+  return "content" in value;
+}
 
-      if (sort !== undefined && sort !== "newest" && sort !== "oldest") {
-        return errorResponse('Error: sort must be "newest" or "oldest"');
-      }
+const listHandler: ToolHandlerEntry = {
+  verb: "fetching documents",
+  run: async (client, args) => {
+    const config = resolveConfig(args);
+    if (isToolResult(config)) {
+      return config;
+    }
 
-      // max_length is passed through as given: omitted means the default budget, 0 means no limit.
-      const options = {
-        limit,
-        offset,
-        maxLength,
-        requestedFields: requestedFields || null,
-        where: where || null,
+    const limit = args?.limit as number | undefined;
+    const offset = args?.offset as number | undefined;
+    const maxLength = args?.max_length as number | undefined;
+    const sort = args?.sort as string | undefined;
+    const requestedFields = args?.requested_fields as string[] | undefined;
+    const where = args?.where as Record<string, unknown> | undefined;
+    const pack = args?.pack as string | undefined;
+
+    if (pack && !config.packable) {
+      return errorResponse(`Error: ${config.plural} cannot be stored in a compendium`);
+    }
+
+    if (sort !== undefined && sort !== "newest" && sort !== "oldest") {
+      return errorResponse('Error: sort must be "newest" or "oldest"');
+    }
+
+    // max_length is passed through as given: omitted means the default budget, 0 means no limit.
+    const options = {
+      limit,
+      offset,
+      maxLength,
+      requestedFields: requestedFields || null,
+      where: where || null,
+    };
+
+    return successResponse(
+      pack
+        ? await client.getPackDocuments(config.documentName, pack, options)
+        : await client.getDocuments(config.collection, { ...options, sort })
+    );
+  },
+};
+
+const getOneHandler: ToolHandlerEntry = {
+  verb: "fetching document",
+  run: async (client, args) => {
+    const config = resolveConfig(args);
+    if (isToolResult(config)) {
+      return config;
+    }
+
+    const id = args?.id as string | undefined;
+    const _id = args?._id as string | undefined;
+    const docName = args?.name as string | undefined;
+    const requestedFields = args?.requested_fields as string[] | undefined;
+    const pack = args?.pack as string | undefined;
+
+    if (!id && !_id && !docName) {
+      return errorResponse("Error: Must provide at least one of: id, _id, or name");
+    }
+
+    if (pack && !config.packable) {
+      return errorResponse(`Error: ${config.plural} cannot be stored in a compendium`);
+    }
+
+    const identifier = { id, _id, name: docName };
+    const options = { requestedFields: requestedFields || null };
+    const doc = pack
+      ? await client.getPackDocument(config.documentName, pack, identifier, options)
+      : await client.getDocument(config.collection, identifier, options);
+
+    if (!doc) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${config.description.charAt(0).toUpperCase() + config.description.slice(1)} not found`,
+          },
+        ],
       };
+    }
 
-      return successResponse(
-        pack
-          ? await client.getPackDocuments(config.documentName, pack, options)
-          : await client.getDocuments(config.collection, { ...options, sort })
-      );
-    },
-  };
-}
-
-function getOneHandler(config: DocumentTypeConfig): ToolHandlerEntry {
-  return {
-    verb: `fetching ${config.description}`,
-    run: async (client, args) => {
-      const id = args?.id as string | undefined;
-      const _id = args?._id as string | undefined;
-      const docName = args?.name as string | undefined;
-      const requestedFields = args?.requested_fields as string[] | undefined;
-      const pack = args?.pack as string | undefined;
-
-      if (!id && !_id && !docName) {
-        return errorResponse("Error: Must provide at least one of: id, _id, or name");
-      }
-
-      if (pack && !config.packable) {
-        return errorResponse(`Error: ${config.plural} cannot be stored in a compendium`);
-      }
-
-      const identifier = { id, _id, name: docName };
-      const options = { requestedFields: requestedFields || null };
-      const doc = pack
-        ? await client.getPackDocument(config.documentName, pack, identifier, options)
-        : await client.getDocument(config.collection, identifier, options);
-
-      if (!doc) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `${config.description.charAt(0).toUpperCase() + config.description.slice(1)} not found`,
-            },
-          ],
-        };
-      }
-
-      return successResponse(doc);
-    },
-  };
-}
+    return successResponse(doc);
+  },
+};
 
 const TOOL_HANDLERS: Readonly<Record<string, ToolHandlerEntry>> = {
-  ...Object.fromEntries(
-    DOCUMENT_TYPES.flatMap((config) => [
-      [`get_${config.plural}`, listHandler(config)],
-      [`get_${config.singular}`, getOneHandler(config)],
-    ])
-  ),
+  get_documents: listHandler,
+  get_document: getOneHandler,
 
   get_compendiums: {
     verb: "fetching compendiums",

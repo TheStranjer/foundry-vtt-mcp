@@ -198,7 +198,7 @@ export function buildPage(
     page.oversized = oversized;
     page.hint =
       `Document ${String(oversized._id)} is ${oversized.bytes} bytes, over the max_length budget of ${maxLength}. ` +
-      `Fetch it with requested_fields (to pick only the fields you need) or with the singular get_ tool; ` +
+      `Fetch it with requested_fields (to pick only the fields you need) or with get_document; ` +
       `then continue with offset=${offset + 1}.`;
   }
   return page;

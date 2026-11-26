@@ -79,7 +79,7 @@ Always inspect existing documents before creating/modifying:
 
 ```json
 // Step 1: Get an example document
-{ "tool": "get_actor", "name": "Example NPC" }
+{ "tool": "get_document", "collection": "actors", "name": "Example NPC" }
 
 // Step 2: Examine the system field structure
 // Step 3: Create/modify using discovered schema
@@ -116,7 +116,8 @@ Actor.system.attributes.*.value
 ### Filter Actors by Folder
 ```json
 {
-  "tool": "get_actors",
+  "tool": "get_documents",
+  "collection": "actors",
   "where": { "folder": "folderId123" },
   "requested_fields": ["name", "type", "system.attributes.hp"]
 }

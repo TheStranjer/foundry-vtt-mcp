@@ -202,7 +202,7 @@ Use `delete_document` with the `pack` field:
 ### Key Points
 
 - The `pack` field tells Foundry to operate on a compendium instead of the world
-- Compendium documents don't appear in `get_actors`, `get_items`, etc. (those only show world documents)
+- Compendium documents don't appear in `get_documents` unless you pass `pack` (otherwise it only shows world documents)
 - All documents in a compendium must be of the same type (specified when creating the compendium)
 - World compendia use the `world.` prefix
 - Deleting a compendium removes all its documents permanently
