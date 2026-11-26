@@ -58,6 +58,13 @@ interface FoundryConnection {
   generation: number | null;
 }
 
+interface LoginResult {
+  credential: FoundryCredential;
+  sessionId: string;
+  generation: number | null;
+  ws: WebSocket;
+}
+
 interface SlimModule {
   id: unknown;
   title?: unknown;
@@ -548,19 +555,24 @@ export class FoundryClient {
    * Fill in a credential's missing userid or username from the world's user
    * list. Credentials that already carry both are returned without a lookup.
    * A failed lookup is logged and the credential is returned as given, so
-   * /join still gets a chance with whatever it carries.
+   * /join still gets a chance with whatever it carries. A generation the caller already
+   * detected is used as given; only when it is omitted does the lookup detect one itself.
    */
   private async completeUserIdentity(
     hostname: string,
     sessionId: string,
-    credential: FoundryCredential
+    credential: FoundryCredential,
+    knownGeneration?: number | null
   ): Promise<FoundryCredential> {
     if (hasCompleteUserIdentity(credential)) {
       return credential;
     }
 
     try {
-      const generation = await this.detectGeneration(hostname, credential.allow_insecure_tls);
+      const generation =
+        knownGeneration !== undefined
+          ? knownGeneration
+          : await this.detectGeneration(hostname, credential.allow_insecure_tls);
       const users = await this.fetchJoinUsers(
         hostname,
         sessionId,
@@ -629,6 +641,58 @@ export class FoundryClient {
     return this.reconnectAttempt;
   }
 
+  /**
+   * The one login sequence: GET /join for a session (unless one is given), fill in a missing
+   * user identity, POST /join, then open a socket bound to the game session. The generation is
+   * detected at most once (unless given) and shared by the identity lookup and the socket.
+   * Returns null when /join rejects the credential; throws on request or binding failures.
+   */
+  private async login(
+    credential: FoundryCredential,
+    options: {
+      sessionId?: string;
+      generation?: number | null;
+      /** Reuse the credential as given instead of looking up a missing userid or username. */
+      skipIdentityLookup?: boolean;
+      /** Called with the credential once its user identity is resolved, even if login then fails. */
+      onCredentialResolved?: (credential: FoundryCredential) => void;
+    } = {}
+  ): Promise<LoginResult | null> {
+    const { hostname } = credential;
+    const allowInsecureTls = credential.allow_insecure_tls;
+
+    const sessionId = options.sessionId ?? (await this.getSession(hostname, allowInsecureTls));
+    if (options.sessionId === undefined) {
+      this.logger.error(`[FoundryClient] Got session ID: ${sessionId}`);
+    }
+
+    let generation = options.generation;
+    const resolveGeneration = async (): Promise<number | null> => {
+      generation ??= await this.detectGeneration(hostname, allowInsecureTls);
+      return generation;
+    };
+
+    let resolved = credential;
+    if (!options.skipIdentityLookup && !hasCompleteUserIdentity(credential)) {
+      resolved = await this.completeUserIdentity(
+        hostname,
+        sessionId,
+        credential,
+        await resolveGeneration()
+      );
+    }
+
+    options.onCredentialResolved?.(resolved);
+
+    if (!(await this.authenticate(hostname, sessionId, resolved))) {
+      return null;
+    }
+
+    const boundGeneration = await resolveGeneration();
+    const ws = await this.openBoundSocket(hostname, sessionId, boundGeneration, allowInsecureTls);
+    return { credential: resolved, sessionId, generation: boundGeneration, ws };
+  }
+
   private async attemptReconnect(connection: FoundryConnection): Promise<boolean> {
     const { hostname, credential, sessionId, generation } = connection;
     const allowInsecureTls = credential.allow_insecure_tls;
@@ -641,9 +705,13 @@ export class FoundryClient {
       // reads), but the socket opened with the old cookie gets a null session. So if this path
       // does not end with a bound socket, fall through to a fresh session.
       try {
-        if (await this.authenticate(hostname, sessionId, credential)) {
-          const ws = await this.openBoundSocket(hostname, sessionId, generation, allowInsecureTls);
-          return this.adoptSocket(connection, ws, sessionId, generation);
+        const login = await this.login(credential, {
+          sessionId,
+          generation,
+          skipIdentityLookup: true,
+        });
+        if (login) {
+          return this.adoptSocket(connection, login.ws, login.sessionId, login.generation);
         }
       } catch (error) {
         this.logger.error(`[FoundryClient] Reconnection with the current session failed: ${error}`);
@@ -655,9 +723,13 @@ export class FoundryClient {
       // been an upgrade, which changes how the socket binds its session.
       const newGeneration = (await this.detectGeneration(hostname, allowInsecureTls)) ?? generation;
       const newSessionId = await this.getSession(hostname, allowInsecureTls);
-      if (await this.authenticate(hostname, newSessionId, credential)) {
-        const ws = await this.openBoundSocket(hostname, newSessionId, newGeneration, allowInsecureTls);
-        return this.adoptSocket(connection, ws, newSessionId, newGeneration);
+      const login = await this.login(credential, {
+        sessionId: newSessionId,
+        generation: newGeneration,
+        skipIdentityLookup: true,
+      });
+      if (login) {
+        return this.adoptSocket(connection, login.ws, login.sessionId, login.generation);
       }
       this.logger.error("[FoundryClient] Reconnection failed - authentication failed");
     } catch (error) {
@@ -717,52 +789,30 @@ export class FoundryClient {
     }
 
     for (let i = 0; i < this.credentials.length; i++) {
-      let credential = this.credentials[i];
+      const credential = this.credentials[i];
       const hostname = credential.hostname;
       this.logger.error(`[FoundryClient] Trying to connect to ${hostname}...`);
 
       try {
-        // Step 1: GET /join to get session cookie
-        const sessionId = await this.getSession(
-          hostname,
-          credential.allow_insecure_tls
-        );
-        this.logger.error(`[FoundryClient] Got session ID: ${sessionId}`);
-
-        // Step 1b: Fill in a missing userid or username from the world's users
-        credential = await this.completeUserIdentity(hostname, sessionId, credential);
-        this.credentials[i] = credential;
-
-        // Step 2: POST /join to authenticate
-        const success = await this.authenticate(hostname, sessionId, credential);
-        if (!success) {
+        const login = await this.login(credential, {
+          onCredentialResolved: (resolved) => {
+            this.credentials[i] = resolved;
+          },
+        });
+        if (!login) {
           this.logger.error(
             `[FoundryClient] Authentication failed for ${hostname}, trying next...`
           );
           continue;
         }
 
-        // Step 3: Detect the Foundry generation to pick the session-binding strategy
-        const generation = await this.detectGeneration(
-          hostname,
-          credential.allow_insecure_tls
-        );
-
-        // Step 4: Establish WebSocket connection and wait for the game session to bind
-        const ws = await this.openBoundSocket(
-          hostname,
-          sessionId,
-          generation,
-          credential.allow_insecure_tls
-        );
-
         // Store the successful connection
         this.connection = {
           hostname,
-          credential,
-          sessionId,
-          ws,
-          generation,
+          credential: login.credential,
+          sessionId: login.sessionId,
+          ws: login.ws,
+          generation: login.generation,
         };
         this.activeCredentialIndex = i;
 
@@ -794,7 +844,7 @@ export class FoundryClient {
 
     const targetIndex = resolveCredentialIndex(this.credentials, identifier);
 
-    let credential = this.credentials[targetIndex];
+    const credential = this.credentials[targetIndex];
     const hostname = credential.hostname;
 
     this.logger.error(`[FoundryClient] Connecting to instance: ${credential._id} (${hostname})...`);
@@ -807,35 +857,21 @@ export class FoundryClient {
     }
 
     // Connect to the chosen instance
-    const sessionId = await this.getSession(
-      hostname,
-      credential.allow_insecure_tls
-    );
-    credential = await this.completeUserIdentity(hostname, sessionId, credential);
-    this.credentials[targetIndex] = credential;
-    const success = await this.authenticate(hostname, sessionId, credential);
-
-    if (!success) {
+    const login = await this.login(credential, {
+      onCredentialResolved: (resolved) => {
+        this.credentials[targetIndex] = resolved;
+      },
+    });
+    if (!login) {
       throw new Error(`Authentication failed for ${hostname}`);
     }
 
-    const generation = await this.detectGeneration(
-      hostname,
-      credential.allow_insecure_tls
-    );
-    const ws = await this.openBoundSocket(
-      hostname,
-      sessionId,
-      generation,
-      credential.allow_insecure_tls
-    );
-
     this.connection = {
       hostname,
-      credential,
-      sessionId,
-      ws,
-      generation,
+      credential: login.credential,
+      sessionId: login.sessionId,
+      ws: login.ws,
+      generation: login.generation,
     };
     this.activeCredentialIndex = targetIndex;
 
