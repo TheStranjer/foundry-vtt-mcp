@@ -67,6 +67,7 @@ describe("FoundryClient", () => {
       const res = new EventEmitter() as any;
       res.headers = { "set-cookie": ["session=abc123; Path=/"] };
       callback(res);
+      res.emit("end");
     });
     const { client } = createClient({ https });
 
@@ -79,6 +80,7 @@ describe("FoundryClient", () => {
       const res = new EventEmitter() as any;
       res.headers = { "set-cookie": ["session=abc123; Path=/"] };
       callback(res);
+      res.emit("end");
     });
     const { client } = createClient({ https });
 
@@ -95,6 +97,7 @@ describe("FoundryClient", () => {
       const res = new EventEmitter() as any;
       res.headers = {};
       callback(res);
+      res.emit("end");
     });
     const { client } = createClient({
       https,
