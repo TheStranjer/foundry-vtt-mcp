@@ -1044,24 +1044,100 @@ describe("FoundryClient", () => {
       expect(page.next_offset).toBe(1);
     });
 
-    test("getPackDocuments rejects an unknown pack without sending a request", async () => {
+    test("a cold-cache pack read sends no world request", async () => {
+      const { client } = createClient();
+      const world = jest.spyOn(client, "requestWorldData");
+      const send = jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({ result: [] });
+
+      await client.getPackDocuments("Item", "world.my-items");
+      await client.getPackDocument("Item", "world.my-items", { _id: "1" });
+
+      expect(world).not.toHaveBeenCalled();
+      expect(send).toHaveBeenCalledTimes(2);
+    });
+
+    test("a successful cold-cache read returns the same result as a warm one", async () => {
+      const docs = [
+        { _id: "1", name: "Sword", type: "weapon" },
+        { _id: "2", name: "Potion", type: "consumable" },
+      ];
+      const cold = createClient().client;
+      jest.spyOn(cold as any, "sendModifyDocumentRequest").mockResolvedValue({ result: docs });
+      const warm = createClient().client;
+      jest.spyOn(warm, "requestWorldData").mockResolvedValue({ packs: worldPacks });
+      jest.spyOn(warm as any, "sendModifyDocumentRequest").mockResolvedValue({ result: docs });
+      await warm.getCompendiums();
+
+      await expect(cold.getPackDocuments("Item", "world.my-items")).resolves.toEqual(
+        await warm.getPackDocuments("Item", "world.my-items")
+      );
+    });
+
+    test("a warm cache rejects an unknown pack without sending a request", async () => {
       const { client } = createClient();
       jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
       const send = jest.spyOn(client as any, "sendModifyDocumentRequest");
+      await client.getCompendiums();
 
       await expect(client.getPackDocuments("Item", "world.nope"))
         .rejects.toThrow('Compendium pack "world.nope" not found');
       expect(send).not.toHaveBeenCalled();
     });
 
-    test("getPackDocuments rejects a pack that holds another document type", async () => {
+    test("a warm cache rejects a pack that holds another document type without sending a request", async () => {
       const { client } = createClient();
       jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
       const send = jest.spyOn(client as any, "sendModifyDocumentRequest");
+      await client.getCompendiums();
 
       await expect(client.getPackDocuments("Actor", "world.my-items"))
         .rejects.toThrow("holds Item documents, not Actor");
       expect(send).not.toHaveBeenCalled();
+    });
+
+    test("a cold-cache unknown pack gives the friendly message without a world request", async () => {
+      const { client } = createClient();
+      const world = jest.spyOn(client, "requestWorldData");
+      jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({
+        error: { message: "Cannot read properties of undefined (reading 'packData')" },
+      });
+
+      await expect(client.getPackDocuments("Item", "world.nope")).rejects.toThrow(
+        'Compendium pack "world.nope" not found. Use get_compendiums to list the available packs.'
+      );
+      await expect(client.getPackDocument("Item", "world.nope", { _id: "1" })).rejects.toThrow(
+        'Compendium pack "world.nope" not found.'
+      );
+      expect(world).not.toHaveBeenCalled();
+    });
+
+    test("a cold-cache type mismatch error falls back to the world for the friendly message", async () => {
+      const { client } = createClient();
+      const world = jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
+      jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({
+        error: { message: "Invalid document type for this pack" },
+      });
+
+      await expect(client.getPackDocuments("Actor", "world.my-items"))
+        .rejects.toThrow("holds Item documents, not Actor");
+      expect(world).toHaveBeenCalledTimes(1);
+    });
+
+    test("a cold-cache error on a valid pack keeps Foundry's message", async () => {
+      const { client } = createClient();
+      jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
+      jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({ error: { message: "boom" } });
+
+      await expect(client.getPackDocuments("Item", "world.my-items")).rejects.toThrow("boom");
+    });
+
+    test("a cold-cache timeout does not fetch the world", async () => {
+      const { client } = createClient();
+      const world = jest.spyOn(client, "requestWorldData");
+      jest.spyOn(client as any, "sendModifyDocumentRequest").mockRejectedValue(new Error("Timeout waiting"));
+
+      await expect(client.getPackDocuments("Item", "world.my-items")).rejects.toThrow("Timeout waiting");
+      expect(world).not.toHaveBeenCalled();
     });
 
     test("getPackDocuments surfaces a server error message", async () => {
@@ -1981,6 +2057,7 @@ describe("FoundryClient", () => {
         .spyOn(client, "requestWorldData")
         .mockImplementation(async () => ({ packs: packs.map((pack) => ({ ...pack })) }));
       jest.spyOn(client as any, "sendGetRequest").mockResolvedValue({ result: [] });
+      await client.getCompendiums();
 
       await expect(client.getPackDocuments("Actor", "world.npcs")).rejects.toThrow("not found");
 
@@ -1991,6 +2068,8 @@ describe("FoundryClient", () => {
       await created;
 
       await expect(client.getPackDocuments("Actor", "world.npcs")).resolves.toMatchObject({ total: 0, documents: [] });
+      expect(spy).toHaveBeenCalledTimes(1);
+      await expect(client.getCompendiums()).resolves.toHaveLength(2);
       expect(spy).toHaveBeenCalledTimes(2);
     });
 

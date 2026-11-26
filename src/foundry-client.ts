@@ -24,7 +24,13 @@ import {
   type DocumentPage,
   type PageParams,
 } from "./core/document-utils.js";
-import { type PackSummary, summarizePacks, validatePackAccess } from "./core/compendium.js";
+import {
+  type PackSummary,
+  isUnknownPackError,
+  packNotFoundMessage,
+  summarizePacks,
+  validatePackAccess,
+} from "./core/compendium.js";
 import {
   COLLECTION_DOCUMENT_NAMES,
   buildIdentifierQuery,
@@ -79,6 +85,9 @@ interface LoginResult {
   generation: number | null;
   ws: WebSocket;
 }
+
+/** An error Foundry returned in its response, as opposed to a timeout or a closed socket. */
+class FoundryResponseError extends Error {}
 
 /** Keys the world snapshot leaves out of `world`: document collections plus bulky system data. */
 const WORLD_SNAPSHOT_DROPPED_KEYS = [
@@ -1215,7 +1224,7 @@ export class FoundryClient {
   private throwOnFoundryError(response: Record<string, unknown>): Record<string, unknown> {
     if (response.error) {
       const error = response.error as { message?: unknown };
-      throw new Error(typeof error.message === "string" ? error.message : String(response.error));
+      throw new FoundryResponseError(typeof error.message === "string" ? error.message : String(response.error));
     }
 
     return response;
@@ -1374,26 +1383,62 @@ export class FoundryClient {
     query: Record<string, unknown>,
     indexFields: string[] | null
   ): Promise<Record<string, unknown>[]> {
-    const snapshot = await this.loadWorldSnapshot();
-    const packError = validatePackAccess(snapshot.packs, pack, documentName);
-    if (packError) {
-      throw new Error(packError);
+    const request = () =>
+      this.sendGetRequest(
+        documentName,
+        {
+          action: "get",
+          pack,
+          query,
+          ...indexOperation(indexFields),
+          broadcast: false,
+        },
+        `Timeout waiting for compendium read response (30s) for ${pack}`,
+        "getPackDocuments"
+      );
+
+    let response: Record<string, unknown>;
+    if (this.worldSnapshot) {
+      // Warm cache: validate locally, as before.
+      const packError = validatePackAccess(this.worldSnapshot.packs, pack, documentName);
+      if (packError) {
+        throw new Error(packError);
+      }
+      response = await request();
+    } else {
+      // Cold cache: skip the world fetch and let Foundry answer.
+      try {
+        response = await request();
+      } catch (error) {
+        throw await this.explainPackReadError(error, documentName, pack);
+      }
     }
 
-    const response = await this.sendGetRequest(
-      documentName,
-      {
-        action: "get",
-        pack,
-        query,
-        ...indexOperation(indexFields),
-        broadcast: false,
-      },
-      `Timeout waiting for compendium read response (30s) for ${pack}`,
-      "getPackDocuments"
-    );
-
     return (response.result as Record<string, unknown>[] | undefined) ?? [];
+  }
+
+  /**
+   * Turn a failed cold-cache pack read into a friendly error. Foundry's unknown-pack crash
+   * ("reading 'packData'") becomes the "not found" message. Any other error Foundry itself
+   * returned (e.g. a document type mismatch) falls back to fetching the world, and only on
+   * this error path, to name the pack's real type. A successful read that returns documents
+   * of the wrong type can't be told apart without the world, so it is returned as Foundry
+   * answered it. Transport errors (timeouts, closed socket) are passed through untouched.
+   */
+  private async explainPackReadError(error: unknown, documentName: string, pack: string): Promise<unknown> {
+    if (!(error instanceof FoundryResponseError)) return error;
+
+    if (isUnknownPackError(error.message)) {
+      return new Error(packNotFoundMessage(pack));
+    }
+
+    try {
+      const snapshot = await this.loadWorldSnapshot();
+      const packError = validatePackAccess(snapshot.packs, pack, documentName);
+      return packError ? new Error(packError) : error;
+    } catch {
+      return error;
+    }
   }
 
   /**
