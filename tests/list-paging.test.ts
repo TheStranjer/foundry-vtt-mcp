@@ -107,15 +107,30 @@ describe("oversized first document", () => {
     expect(page.documents).toEqual([]);
     expect(page.returned).toBe(0);
     expect(page.oversized).toEqual({ _id: "a", name: "Big", bytes: bytes(big[0]) });
-    expect(page.next_offset).toBe(0);
+    expect(page.next_offset).toBe(1);
     expect(page.hint).toContain("requested_fields");
     expect(page.hint).toContain("get_document");
   });
 
-  test("next_offset is the oversized document's offset", () => {
-    const page = pageDocuments([{ _id: "z", name: "Z" }, ...big], { limit: 10, offset: 1, maxLength: 100 });
+  test("next_offset is the offset after the oversized document", () => {
+    const docs = [{ _id: "z", name: "Z" }, ...big];
+    const page = pageDocuments(docs, { limit: 10, offset: 1, maxLength: 100 });
     expect(page.oversized?._id).toBe("a");
-    expect(page.next_offset).toBe(1);
+    expect(page.next_offset).toBe(2);
+    expect(page.hint).toContain("offset=2");
+  });
+
+  test("following next_offset moves past the oversized document", () => {
+    const first = pageDocuments(big, { limit: 10, offset: 0, maxLength: 100 });
+    const second = pageDocuments(big, { limit: 10, offset: first.next_offset!, maxLength: 100 });
+    expect(second.oversized).toBeUndefined();
+    expect(second.documents).toEqual([big[1]]);
+    expect(second.next_offset).toBeNull();
+  });
+
+  test("next_offset is null when the oversized document is the last one", () => {
+    const page = pageDocuments([big[0]], { limit: 10, offset: 0, maxLength: 100 });
+    expect(page.next_offset).toBeNull();
   });
 
   test("a later oversized document just ends the page", () => {
@@ -340,7 +355,7 @@ describe("message order", () => {
     const page = await client.getDocuments("messages", { requestedFields: ["*"], maxLength: 100 });
     expect(page.documents).toEqual([]);
     expect(page.oversized).toMatchObject({ _id: "b" });
-    expect(page.next_offset).toBe(0);
+    expect(page.next_offset).toBe(1);
   });
 });
 

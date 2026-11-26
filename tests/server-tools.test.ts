@@ -19,6 +19,16 @@ describe("server tools", () => {
     }
   });
 
+  test("no description mentions get_* or an old per-collection tool", () => {
+    const text = JSON.stringify(createToolDefinitions());
+    expect(text).not.toContain("get_*");
+    for (const config of DOCUMENT_TYPES) {
+      for (const name of [`get_${config.plural}`, `get_${config.singular}`]) {
+        expect(text).not.toMatch(new RegExp(`${name}\\b`));
+      }
+    }
+  });
+
   test("the tool list stays under its byte budget", () => {
     expect(JSON.stringify(createToolDefinitions()).length).toBeLessThan(12000);
   });
