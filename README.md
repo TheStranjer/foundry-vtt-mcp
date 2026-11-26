@@ -134,7 +134,7 @@ Two tools read every collection. `collection` is one of `actors`, `items`, `fold
 
 Lists the documents of a collection from the connected world, one page at a time.
 
-**Response:** `{ total, offset, returned, next_offset, documents }`. `total` is the count after the `where` filter; `next_offset` is the `offset` of the next page, or `null` when nothing is left.
+**Response:** `{ total, offset, returned, next_offset, documents }`. `total` is the count after the `where` filter; `next_offset` is the `offset` of the next page, or `null` when nothing is left. When `total` is 0 and `where` is set, the response also has `where_hint`: for each `where` key, the sorted distinct values that exist in the collection or pack (at most 20, then `"+N more"`; `_id` shows `"unique per document"`).
 
 **Parameters:**
 - `collection` (string, required): The collection to list.
