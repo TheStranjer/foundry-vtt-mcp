@@ -1,5 +1,8 @@
 import {
+  buildEmitMessage,
   buildModifyDocumentMessage,
+  engineReplyFor,
+  SOCKET_CONNECT,
   ENGINE_PING,
   ENGINE_PONG,
   isEngineHandshake,
@@ -15,6 +18,24 @@ import {
 describe("socket protocol", () => {
   test("WORLD_REQUEST_MESSAGE is correct", () => {
     expect(WORLD_REQUEST_MESSAGE).toBe('420["world"]');
+  });
+
+  test("engineReplyFor answers the handshake with the Socket.IO connect and a ping with a pong", () => {
+    expect(engineReplyFor('0{"sid":"x"}')).toBe(SOCKET_CONNECT);
+    expect(SOCKET_CONNECT).toBe("40");
+    expect(engineReplyFor("2")).toBe("3");
+  });
+
+  test("engineReplyFor leaves every other frame alone", () => {
+    expect(engineReplyFor('40{"sid":"y"}')).toBeNull();
+    expect(engineReplyFor('42["session",null]')).toBeNull();
+    expect(engineReplyFor('431[{"ok":true}]')).toBeNull();
+  });
+
+  test("buildEmitMessage frames an event with its ack id", () => {
+    expect(buildEmitMessage(3, "world")).toBe('423["world"]');
+    expect(buildEmitMessage(12, "manageFiles", [{ a: 1 }, { b: 2 }]))
+      .toBe('4212["manageFiles",{"a":1},{"b":2}]');
   });
 
   test("isEngineHandshake detects handshake", () => {

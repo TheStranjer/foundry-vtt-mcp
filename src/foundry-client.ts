@@ -22,17 +22,16 @@ import { type PackSummary, summarizePacks, validatePackAccess } from "./core/com
 import { COLLECTION_DOCUMENT_NAMES, buildIdentifierQuery, whereToServerQuery } from "./core/collections.js";
 import { buildDocumentOperation } from "./core/operations.js";
 import {
-  buildModifyDocumentMessage,
-  ENGINE_PONG,
+  buildEmitMessage,
+  engineReplyFor,
   isEngineHandshake,
-  isEnginePing,
   isSessionEvent,
-  ackIdOf,
   parseAckMessage,
   parseSessionPayload,
-  parseWorldResponseMessage,
-  WORLD_REQUEST_MESSAGE,
+  SOCKET_CONNECT,
+  type SessionPayload,
 } from "./core/socket-protocol.js";
+import { AckDispatcher } from "./core/ack-dispatcher.js";
 import { selectSocketConnection } from "./core/socket-connection.js";
 import { parseFoundryGeneration } from "./core/version.js";
 import {
@@ -43,7 +42,6 @@ import {
 import { filterWorldData } from "./core/world.js";
 import {
   type JoinUser,
-  buildJoinDataRequestMessage,
   hasCompleteUserIdentity,
   parseJoinDataUsers,
   resolveUserIdentity,
@@ -73,11 +71,34 @@ const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000, 30000, 60000];
 /** Silence allowed on an HTTP request. A server can accept it and then never answer. */
 const REQUEST_TIMEOUT_MS = 10000;
 
+/** Time a socket request may wait for its ack. */
+const ACK_TIMEOUT_MS = 30000;
+
+/** Time to wait for the game session to bind, and for the join-data reply. */
+const SOCKET_SETUP_TIMEOUT_MS = 10000;
+
 /** Silence allowed on a file upload or download, which can pause longer than a small API call. */
 const TRANSFER_TIMEOUT_MS = 60000;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** How a socket request is timed and named in logs and timeout errors. */
+interface AckOptions {
+  timeoutMs: number;
+  /** Names the request in logs and in the default timeout message. */
+  label: string;
+  /** Overrides the default `Timeout waiting for <label> response (<n>s)`. */
+  timeoutMessage?: string;
+}
+
+/** A request whose id is allocated and whose ack is awaited, but which has not been sent yet. */
+interface PendingAckCall {
+  id: number;
+  /** The parsed ack payload (`[...]`). Rejects on timeout or a malformed ack. */
+  result: Promise<unknown[]>;
+  send: (event: string, args?: unknown[]) => void;
 }
 
 /** A request made through {@link FoundryClient.httpsRequest}. */
@@ -110,6 +131,8 @@ export class FoundryClient {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private configPath: string;
   private messageCounter = 1;
+  /** One dispatcher per socket; a replaced socket's pending requests go with it. */
+  private ackDispatchers = new WeakMap<WebSocket, AckDispatcher>();
   private credentials: FoundryCredential[] = [];
   private activeCredentialIndex: number = -1;
   private wsLogger: WebSocketLogger;
@@ -411,28 +434,142 @@ export class FoundryClient {
       this.logger.error(`[FoundryClient] WebSocket error: ${error.message}`);
     });
 
+    const acks = this.ackDispatcher(ws, true);
     ws.on("message", (data) => {
       const message = data.toString();
       this.wsLogger.logInbound(message);
       this.logger.error(`[FoundryClient] WebSocket message: ${message}`);
 
-      if (isEngineHandshake(message)) {
-        this.logger.error("[FoundryClient] Received Engine.IO handshake, sending Socket.IO connect");
-        this.sendWebSocketMessage(ws, "40");
-        return;
-      }
+      if (this.answerEngineFrame(ws, message)) return;
 
-      if (isEnginePing(message)) {
-        // Engine.IO v4: the server pings; we must pong or the server drops the
-        // connection after pingTimeout (~10 min of silence for Foundry).
-        this.sendWebSocketMessage(ws, ENGINE_PONG);
-        return;
-      }
+      if (acks.dispatch(message)) return;
 
       if (isSessionEvent(message)) {
         this.logger.error("[FoundryClient] Received session event, connection ready");
         return;
       }
+    });
+  }
+
+  /**
+   * Answer the transport-level frames every socket must answer: the Engine.IO handshake
+   * (with the Socket.IO connect) and the server's pings (with a pong, or the server drops the
+   * connection after pingTimeout, ~10 min of silence for Foundry). True if the frame was one.
+   */
+  private answerEngineFrame(ws: WebSocket, message: string): boolean {
+    const reply = engineReplyFor(message);
+    if (reply === null) return false;
+
+    if (isEngineHandshake(message)) {
+      this.logger.error("[FoundryClient] Received Engine.IO handshake, sending Socket.IO connect");
+    }
+    this.sendWebSocketMessage(ws, reply);
+    return true;
+  }
+
+  /**
+   * The socket's one ack dispatcher. A socket that routes its own frames passes `ownFrames`
+   * and calls `dispatch` from its message handler; any other socket gets a listener that does
+   * nothing else, installed the first time a request is made on it.
+   */
+  private ackDispatcher(ws: WebSocket, ownFrames = false): AckDispatcher {
+    let dispatcher = this.ackDispatchers.get(ws);
+    if (!dispatcher) {
+      const created = new AckDispatcher();
+      dispatcher = created;
+      this.ackDispatchers.set(ws, created);
+      if (!ownFrames) {
+        ws.on("message", (data: WebSocket.Data) => {
+          created.dispatch(data.toString());
+        });
+      }
+    }
+    return dispatcher;
+  }
+
+  /**
+   * Allocate an ack id and start waiting for its reply, without sending anything yet.
+   * The reply is routed here by id only; it is parsed once, by this request.
+   */
+  private openAck(ws: WebSocket, options: AckOptions): PendingAckCall {
+    const dispatcher = this.ackDispatcher(ws);
+    const id = this.messageCounter++;
+    const { timeoutMs, label } = options;
+    const timeoutMessage =
+      options.timeoutMessage ?? `Timeout waiting for ${label} response (${timeoutMs / 1000}s)`;
+
+    const result = new Promise<unknown[]>((resolve, reject) => {
+      const timeout = this.setTimeoutFn(() => {
+        dispatcher.remove(id);
+        reject(new Error(timeoutMessage));
+      }, timeoutMs);
+
+      dispatcher.add(id, (frame) => {
+        this.clearTimeoutFn(timeout);
+        const ack = parseAckMessage(frame);
+        if (ack.error || !ack.payload) {
+          reject(ack.error ?? new Error("Invalid ack format: empty payload"));
+          return;
+        }
+        resolve(ack.payload);
+      });
+    });
+
+    const send = (event: string, args: unknown[] = []) => {
+      const message = buildEmitMessage(id, event, args);
+      this.logger.error(`[FoundryClient] Sending ${label}: ${message}`);
+      this.sendWebSocketMessage(ws, message);
+    };
+
+    return { id, result, send };
+  }
+
+  /**
+   * Emit `event` on the connected socket and resolve with the parsed ack payload. Rejects when
+   * not connected, on timeout, or on a malformed ack. The caller checks the payload itself.
+   */
+  private emitWithAck(event: string, args: unknown[], options: AckOptions): Promise<unknown[]> {
+    const ws = this.requireSocket();
+    const call = this.openAck(ws, options);
+    call.send(event, args);
+    return call.result;
+  }
+
+  private requireSocket(): WebSocket {
+    if (!this.connection || this.connection.ws.readyState !== this.WebSocketCtor.OPEN) {
+      throw new Error("Not connected to Foundry server");
+    }
+    return this.connection.ws;
+  }
+
+  /**
+   * Wait for a Socket.IO event (not an ack). `match` returns a value for the frame that is
+   * awaited and undefined for any other; the first value resolves the wait.
+   */
+  private waitForEvent<T>(
+    ws: WebSocket,
+    match: (message: string) => T | undefined,
+    timeoutMs: number,
+    timeoutMessage: string
+  ): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const timeout = this.setTimeoutFn(() => {
+        ws.off("message", messageHandler);
+        reject(new Error(timeoutMessage));
+      }, timeoutMs);
+
+      const messageHandler = (data: WebSocket.Data) => {
+        const matched = match(data.toString());
+        if (matched === undefined) {
+          return;
+        }
+
+        this.clearTimeoutFn(timeout);
+        ws.off("message", messageHandler);
+        resolve(matched);
+      };
+
+      ws.on("message", messageHandler);
     });
   }
 
@@ -447,40 +584,28 @@ export class FoundryClient {
    * surfacing it here turns a silent 30s data timeout into an immediate, clear
    * error.
    */
-  private waitForGameSession(ws: WebSocket): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const timeout = this.setTimeoutFn(() => {
-        ws.off("message", messageHandler);
-        reject(new Error("Timed out waiting for Foundry to bind the game session (10s)"));
-      }, 10000);
+  private async waitForGameSession(ws: WebSocket): Promise<void> {
+    const session = await this.waitForEvent<SessionPayload>(
+      ws,
+      (message) => {
+        if (!isSessionEvent(message)) return undefined;
+        const parsed = parseSessionPayload(message);
+        return parsed.matched ? parsed : undefined;
+      },
+      SOCKET_SETUP_TIMEOUT_MS,
+      "Timed out waiting for Foundry to bind the game session (10s)"
+    );
 
-      const messageHandler = (data: WebSocket.Data) => {
-        const parsed = parseSessionPayload(data.toString());
-        if (!parsed.matched) {
-          return;
-        }
+    if (!session.sessionId) {
+      throw new Error(
+        "Foundry returned a null session; the socket was not bound to a user. " +
+          "Check credentials and that the session was carried on the WebSocket upgrade."
+      );
+    }
 
-        this.clearTimeoutFn(timeout);
-        ws.off("message", messageHandler);
-
-        if (!parsed.sessionId) {
-          reject(
-            new Error(
-              "Foundry returned a null session; the socket was not bound to a user. " +
-                "Check credentials and that the session was carried on the WebSocket upgrade."
-            )
-          );
-          return;
-        }
-
-        this.logger.error(
-          `[FoundryClient] Game session bound (sessionId=${parsed.sessionId}, userId=${parsed.userId ?? "unknown"})`
-        );
-        resolve();
-      };
-
-      ws.on("message", messageHandler);
-    });
+    this.logger.error(
+      `[FoundryClient] Game session bound (sessionId=${session.sessionId}, userId=${session.userId ?? "unknown"})`
+    );
   }
 
   /**
@@ -494,51 +619,29 @@ export class FoundryClient {
     allowInsecureTls = false
   ): Promise<JoinUser[]> {
     const ws = await this.connectWebSocket(hostname, sessionId, generation, allowInsecureTls);
-    const ackId = this.messageCounter++;
+    const acks = this.ackDispatcher(ws, true);
+    const call = this.openAck(ws, {
+      timeoutMs: SOCKET_SETUP_TIMEOUT_MS,
+      label: "getJoinData",
+      timeoutMessage: "Timed out waiting for Foundry join data (10s)",
+    });
+
+    ws.on("message", (data) => {
+      const message = data.toString();
+      this.wsLogger.logInbound(message);
+
+      if (this.answerEngineFrame(ws, message)) return;
+      // The Socket.IO connect is acknowledged: only now may the request go out.
+      if (message.startsWith(SOCKET_CONNECT)) {
+        call.send("getJoinData");
+        return;
+      }
+      acks.dispatch(message);
+    });
 
     try {
-      return await new Promise<JoinUser[]>((resolve, reject) => {
-        const timeout = this.setTimeoutFn(() => {
-          ws.off("message", messageHandler);
-          reject(new Error("Timed out waiting for Foundry join data (10s)"));
-        }, 10000);
-
-        const messageHandler = (data: WebSocket.Data) => {
-          const message = data.toString();
-          this.wsLogger.logInbound(message);
-
-          if (isEngineHandshake(message)) {
-            this.sendWebSocketMessage(ws, "40");
-            return;
-          }
-          if (isEnginePing(message)) {
-            this.sendWebSocketMessage(ws, ENGINE_PONG);
-            return;
-          }
-          if (message.startsWith("40")) {
-            this.sendWebSocketMessage(ws, buildJoinDataRequestMessage(ackId));
-            return;
-          }
-          if (ackIdOf(message) !== ackId) {
-            return;
-          }
-
-          this.clearTimeoutFn(timeout);
-          ws.off("message", messageHandler);
-
-          const ack = parseAckMessage(message);
-          try {
-            if (ack.error || !ack.payload) {
-              throw ack.error ?? new Error("Empty join data response");
-            }
-            resolve(parseJoinDataUsers(ack.payload));
-          } catch (error) {
-            reject(error);
-          }
-        };
-
-        ws.on("message", messageHandler);
-      });
+      const payload = await call.result;
+      return parseJoinDataUsers(payload);
     } finally {
       ws.close();
     }
@@ -908,42 +1011,14 @@ export class FoundryClient {
    * @returns The full world data response object
    */
   async requestWorldData(): Promise<Record<string, unknown>> {
-    if (!this.connection || this.connection.ws.readyState !== this.WebSocketCtor.OPEN) {
-      throw new Error("Not connected to Foundry server");
-    }
-
-    const ws = this.connection.ws;
-
-    return new Promise((resolve, reject) => {
-      const timeout = this.setTimeoutFn(() => {
-        ws.off("message", messageHandler);
-        reject(new Error("Timeout waiting for world data (30s)"));
-      }, 30000);
-
-      const messageHandler = (data: WebSocket.Data) => {
-        const message = data.toString();
-        const parsed = parseWorldResponseMessage(message);
-        if (!parsed.matched) {
-          return;
-        }
-
-        this.clearTimeoutFn(timeout);
-        ws.off("message", messageHandler);
-
-        if (parsed.error) {
-          reject(parsed.error);
-          return;
-        }
-
-        resolve(parsed.data as Record<string, unknown>);
-      };
-
-      ws.on("message", messageHandler);
-
-      // Send the world request
-      this.logger.error("[FoundryClient] Requesting world data...");
-      this.sendWebSocketMessage(ws, WORLD_REQUEST_MESSAGE);
+    this.requireSocket();
+    this.logger.error("[FoundryClient] Requesting world data...");
+    const payload = await this.emitWithAck("world", [], {
+      timeoutMs: ACK_TIMEOUT_MS,
+      label: "world",
+      timeoutMessage: "Timeout waiting for world data (30s)",
     });
+    return payload[0] as Record<string, unknown>;
   }
 
   private async sendModifyDocumentRequest(
@@ -954,76 +1029,23 @@ export class FoundryClient {
     isMatch: (responseData: Record<string, unknown>) => boolean,
     logLabel = "modifyDocument"
   ): Promise<Record<string, unknown>> {
-    if (!this.connection || this.connection.ws.readyState !== this.WebSocketCtor.OPEN) {
-      throw new Error("Not connected to Foundry server");
+    const payload = await this.emitWithAck(
+      "modifyDocument",
+      [{ type, action, operation }],
+      { timeoutMs: ACK_TIMEOUT_MS, label: logLabel, timeoutMessage }
+    );
+    const responseData = payload[0] as Record<string, unknown>;
+
+    // A Foundry error is the answer to this request; the caller throws it.
+    if (responseData.error) {
+      return responseData;
     }
 
-    const ws = this.connection.ws;
-    const ackId = this.messageCounter++;
-    const payload = [
-      "modifyDocument",
-      {
-        type,
-        action,
-        operation,
-      },
-    ];
+    if (responseData.type !== type || !isMatch(responseData)) {
+      throw new Error(`Unexpected ${logLabel} response for ${type}`);
+    }
 
-    return new Promise((resolve, reject) => {
-      const finishResolve = (responseData: Record<string, unknown>) => {
-        this.clearTimeoutFn(timeout);
-        ws.off("message", messageHandler);
-        resolve(responseData);
-      };
-
-      const timeout = this.setTimeoutFn(() => {
-        ws.off("message", messageHandler);
-        reject(new Error(timeoutMessage));
-      }, 30000);
-
-      const messageHandler = (data: WebSocket.Data) => {
-        const message = data.toString();
-
-        const parsed = parseAckMessage(message);
-        if (!parsed.matched) {
-          return;
-        }
-
-        // Another request's answer (same document type, sent concurrently).
-        const respondedAckId = ackIdOf(message);
-        if (respondedAckId !== null && respondedAckId !== ackId) {
-          return;
-        }
-
-        if (parsed.error || !parsed.payload) {
-          return;
-        }
-
-        const responseData = parsed.payload[0] as Record<string, unknown>;
-
-        if (responseData.type !== type) {
-          return;
-        }
-
-        if (responseData.error) {
-          finishResolve(responseData);
-          return;
-        }
-
-        if (!isMatch(responseData)) {
-          return;
-        }
-
-        finishResolve(responseData);
-      };
-
-      ws.on("message", messageHandler);
-
-      // Send the modifyDocument request
-      const messageStr = buildModifyDocumentMessage(ackId, payload);
-      this.logger.error(`[FoundryClient] Sending ${logLabel}: ${messageStr}`);
-      this.sendWebSocketMessage(ws, messageStr);
-    });
+    return responseData;
   }
 
   /**
@@ -1719,94 +1741,45 @@ export class FoundryClient {
       extensions = [".apng", ".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".tiff", ".webp"],
     } = options;
 
-    if (!this.connection || this.connection.ws.readyState !== this.WebSocketCtor.OPEN) {
-      throw new Error("Not connected to Foundry server");
+    this.requireSocket();
+
+    const payload = await this.emitWithAck(
+      "manageFiles",
+      [
+        {
+          action: "browseFiles",
+          storage: "data",
+          target,
+        },
+        {
+          type,
+          extensions,
+          wildcard: false,
+          render: true,
+        },
+      ],
+      { timeoutMs: ACK_TIMEOUT_MS, label: "browseFiles" }
+    );
+    const responseData = payload[0] as Record<string, unknown>;
+
+    if (responseData.error) {
+      throw new Error(`Browse files failed: ${responseData.error}`);
     }
 
-    const ws = this.connection.ws;
-    const ackId = this.messageCounter++;
+    // A directory listing always carries dirs.
+    if (!("dirs" in responseData)) {
+      throw new Error("Unexpected browseFiles response");
+    }
 
-    const payload = [
-      "manageFiles",
-      {
-        action: "browseFiles",
-        storage: "data",
-        target,
-      },
-      {
-        type,
-        extensions,
-        wildcard: false,
-        render: true,
-      },
-    ];
-
-    return new Promise((resolve, reject) => {
-      const timeout = this.setTimeoutFn(() => {
-        ws.off("message", messageHandler);
-        reject(new Error("Timeout waiting for browseFiles response (30s)"));
-      }, 30000);
-
-      const messageHandler = (data: WebSocket.Data) => {
-        const message = data.toString();
-
-        // Parse ack message format: 43[payload]
-        const parsed = parseAckMessage(message);
-        if (!parsed.matched) {
-          return;
-        }
-
-        // Another request's answer (same document type, sent concurrently).
-        const respondedAckId = ackIdOf(message);
-        if (respondedAckId !== null && respondedAckId !== ackId) {
-          return;
-        }
-
-        if (parsed.error || !parsed.payload) {
-          return;
-        }
-
-        const responseData = parsed.payload[0] as Record<string, unknown>;
-
-        // Check for error response first (may not have dirs property)
-        if (responseData.error && !("dirs" in responseData)) {
-          this.clearTimeoutFn(timeout);
-          ws.off("message", messageHandler);
-          reject(new Error(`Browse files failed: ${responseData.error}`));
-          return;
-        }
-
-        // Check if this is a file browser response (has dirs array)
-        if (!("dirs" in responseData)) {
-          return;
-        }
-
-        this.clearTimeoutFn(timeout);
-        ws.off("message", messageHandler);
-
-        if (responseData.error) {
-          reject(new Error(`Browse files failed: ${responseData.error}`));
-          return;
-        }
-
-        resolve(responseData as {
-          target: string;
-          private: boolean;
-          gridSize: number | null;
-          dirs: string[];
-          privateDirs: string[];
-          files: string[];
-          extensions: string[];
-        });
-      };
-
-      ws.on("message", messageHandler);
-
-      // Send the manageFiles request
-      const messageStr = `42${ackId}${JSON.stringify(payload)}`;
-      this.logger.error(`[FoundryClient] Sending browseFiles: ${messageStr}`);
-      this.sendWebSocketMessage(ws, messageStr);
-    });
+    return responseData as {
+      target: string;
+      private: boolean;
+      gridSize: number | null;
+      dirs: string[];
+      privateDirs: string[];
+      files: string[];
+      extensions: string[];
+    };
   }
 
   /**
@@ -1826,73 +1799,11 @@ export class FoundryClient {
     label: string,
     type: string
   ): Promise<Record<string, unknown>> {
-    if (!this.connection || this.connection.ws.readyState !== this.WebSocketCtor.OPEN) {
-      throw new Error("Not connected to Foundry server");
-    }
-
-    const ws = this.connection.ws;
-    const ackId = this.messageCounter++;
-
-    const payload = [
-      "manageCompendium",
-      {
-        action: "create",
-        data: {
-          label,
-          type,
-        },
-        options: {},
-      },
-    ];
-
-    return new Promise((resolve, reject) => {
-      const timeout = this.setTimeoutFn(() => {
-        ws.off("message", messageHandler);
-        reject(new Error("Timeout waiting for createCompendium response (30s)"));
-      }, 30000);
-
-      const messageHandler = (data: WebSocket.Data) => {
-        const message = data.toString();
-
-        const parsed = parseAckMessage(message);
-        if (!parsed.matched) {
-          return;
-        }
-
-        // Another request's answer (same document type, sent concurrently).
-        const respondedAckId = ackIdOf(message);
-        if (respondedAckId !== null && respondedAckId !== ackId) {
-          return;
-        }
-
-        if (parsed.error || !parsed.payload) {
-          return;
-        }
-
-        const responseData = parsed.payload[0] as Record<string, unknown>;
-
-        // Check if this is a compendium management response
-        if (!responseData.request || (responseData.request as Record<string, unknown>).action !== "create") {
-          return;
-        }
-
-        this.clearTimeoutFn(timeout);
-        ws.off("message", messageHandler);
-
-        if (responseData.error) {
-          reject(new Error(`Create compendium failed: ${responseData.error}`));
-          return;
-        }
-
-        resolve(responseData);
-      };
-
-      ws.on("message", messageHandler);
-
-      const messageStr = `42${ackId}${JSON.stringify(payload)}`;
-      this.logger.error(`[FoundryClient] Sending createCompendium: ${messageStr}`);
-      this.sendWebSocketMessage(ws, messageStr);
-    });
+    return this.manageCompendium(
+      "create",
+      { action: "create", data: { label, type }, options: {} },
+      "Create compendium failed"
+    );
   }
 
   /**
@@ -1901,69 +1812,34 @@ export class FoundryClient {
    * @returns The result from Foundry containing the deleted compendium ID
    */
   async deleteCompendium(name: string): Promise<Record<string, unknown>> {
-    if (!this.connection || this.connection.ws.readyState !== this.WebSocketCtor.OPEN) {
-      throw new Error("Not connected to Foundry server");
+    return this.manageCompendium(
+      "delete",
+      { action: "delete", data: name },
+      "Delete compendium failed"
+    );
+  }
+
+  /** Send a manageCompendium request and check that the reply answers the same action. */
+  private async manageCompendium(
+    action: "create" | "delete",
+    request: Record<string, unknown>,
+    failure: string
+  ): Promise<Record<string, unknown>> {
+    const payload = await this.emitWithAck("manageCompendium", [request], {
+      timeoutMs: ACK_TIMEOUT_MS,
+      label: `${action}Compendium`,
+    });
+    const responseData = payload[0] as Record<string, unknown>;
+
+    if ((responseData.request as Record<string, unknown> | undefined)?.action !== action) {
+      throw new Error(`Unexpected ${action}Compendium response`);
     }
 
-    const ws = this.connection.ws;
-    const ackId = this.messageCounter++;
+    if (responseData.error) {
+      throw new Error(`${failure}: ${responseData.error}`);
+    }
 
-    const payload = [
-      "manageCompendium",
-      {
-        action: "delete",
-        data: name,
-      },
-    ];
-
-    return new Promise((resolve, reject) => {
-      const timeout = this.setTimeoutFn(() => {
-        ws.off("message", messageHandler);
-        reject(new Error("Timeout waiting for deleteCompendium response (30s)"));
-      }, 30000);
-
-      const messageHandler = (data: WebSocket.Data) => {
-        const message = data.toString();
-
-        const parsed = parseAckMessage(message);
-        if (!parsed.matched) {
-          return;
-        }
-
-        // Another request's answer (same document type, sent concurrently).
-        const respondedAckId = ackIdOf(message);
-        if (respondedAckId !== null && respondedAckId !== ackId) {
-          return;
-        }
-
-        if (parsed.error || !parsed.payload) {
-          return;
-        }
-
-        const responseData = parsed.payload[0] as Record<string, unknown>;
-
-        // Check if this is a compendium management response
-        if (!responseData.request || (responseData.request as Record<string, unknown>).action !== "delete") {
-          return;
-        }
-
-        this.clearTimeoutFn(timeout);
-        ws.off("message", messageHandler);
-
-        if (responseData.error) {
-          reject(new Error(`Delete compendium failed: ${responseData.error}`));
-          return;
-        }
-
-        resolve(responseData);
-      };
-
-      ws.on("message", messageHandler);
-
-      const messageStr = `42${ackId}${JSON.stringify(payload)}`;
-      this.logger.error(`[FoundryClient] Sending deleteCompendium: ${messageStr}`);
-      this.sendWebSocketMessage(ws, messageStr);
-    });
+    return responseData;
   }
 
   /**
