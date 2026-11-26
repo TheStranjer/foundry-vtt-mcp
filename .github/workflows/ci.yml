@@ -2,8 +2,17 @@ name: CI
 
 on:
   push:
-    branches: ["master"]
   pull_request:
+
+# The job only reads the repository; nothing here needs to write with GITHUB_TOKEN.
+permissions:
+  contents: read
+
+concurrency:
+  # Every push to master gets its own run, so each landing gets a verdict;
+  # other branches still cancel a run a newer push superseded.
+  group: ci-${{ github.workflow }}-${{ github.ref == 'refs/heads/master' && github.sha || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-and-test:
