@@ -95,3 +95,43 @@ export function filterDocumentsByWhere(
     return true;
   });
 }
+
+export interface DocumentShape {
+  where?: Record<string, unknown> | null;
+  requestedFields?: string[] | null;
+  maxLength?: number | null;
+}
+
+/** Shared read pipeline: where filter, then field filter, then size truncation. */
+export function shapeDocuments(
+  docs: Record<string, unknown>[],
+  shape: DocumentShape
+): Record<string, unknown>[] {
+  const requestedFields = shape.requestedFields ?? null;
+  const filtered = filterDocumentsByWhere(docs, shape.where ?? null).map((doc) =>
+    filterDocumentFields(doc, requestedFields)
+  );
+  return truncateDocuments(filtered, shape.maxLength ?? 0);
+}
+
+/**
+ * Shared single-document lookup: find by id, then _id, then name (same precedence
+ * as buildIdentifierQuery), and apply the field filter. Returns null if none match.
+ */
+export function pickDocument(
+  docs: Record<string, unknown>[],
+  identifier: { id?: string; _id?: string; name?: string },
+  requestedFields: string[] | null
+): Record<string, unknown> | null {
+  let doc: Record<string, unknown> | undefined;
+
+  if (identifier.id) {
+    doc = docs.find((d) => d.id === identifier.id || d._id === identifier.id);
+  } else if (identifier._id) {
+    doc = docs.find((d) => d._id === identifier._id || d.id === identifier._id);
+  } else if (identifier.name) {
+    doc = docs.find((d) => d.name === identifier.name);
+  }
+
+  return doc ? filterDocumentFields(doc, requestedFields) : null;
+}
