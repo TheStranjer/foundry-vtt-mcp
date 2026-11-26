@@ -33,12 +33,22 @@ export function summarizePacks(packs: unknown, documentName?: string | null): Pa
     });
 }
 
+export function packNotFoundMessage(packId: string): string {
+  return `Compendium pack "${packId}" not found. Use get_compendiums to list the available packs.`;
+}
+
+/** True when Foundry's error text is its opaque crash for an unknown pack. */
+export function isUnknownPackError(message: string): boolean {
+  return /packData/.test(message);
+}
+
 /**
  * Check that a compendium pack exists and holds the requested document type.
  * Returns an error message, or null when the pack can be read.
  *
  * Foundry itself answers an unknown pack with an opaque crash
- * ("Cannot read properties of undefined (reading 'packData')"), so this is checked up front.
+ * ("Cannot read properties of undefined (reading 'packData')"), so this is checked up front when the world snapshot is already cached. With a cold cache the
+ * pack request is sent directly and the crash is translated (see isUnknownPackError).
  */
 export function validatePackAccess(
   packs: unknown,
@@ -48,7 +58,7 @@ export function validatePackAccess(
   const pack = asPackList(packs).find((candidate) => candidate.id === packId);
 
   if (!pack) {
-    return `Compendium pack "${packId}" not found. Use get_compendiums to list the available packs.`;
+    return packNotFoundMessage(packId);
   }
 
   if (pack.type !== documentName) {
