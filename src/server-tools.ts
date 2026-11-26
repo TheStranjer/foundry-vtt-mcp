@@ -1,5 +1,6 @@
 import type { FoundryClient } from "./foundry-client.js";
 import { DOCUMENT_TYPES, type DocumentTypeConfig } from "./core/collections.js";
+import { DEFAULT_LIMIT, DEFAULT_MAX_LENGTH, MAX_LIMIT } from "./core/document-utils.js";
 
 export { DOCUMENT_TYPES, type DocumentTypeConfig };
 
@@ -15,26 +16,46 @@ function packProperty(config: DocumentTypeConfig) {
 }
 
 export function generateListToolDefinition(config: DocumentTypeConfig) {
+  const plural = config.plural;
+  const summary = config.summaryFields.join(", ");
+  const sortProperty = config.sortField
+    ? {
+        sort: {
+          type: "string",
+          enum: ["newest", "oldest"],
+          description: `Order of the ${plural}, by ${config.sortField}: "newest" (default) or "oldest". Paging with offset follows this order.`,
+        },
+      }
+    : {};
   return {
-    name: `get_${config.plural}`,
-    description: `Get all ${config.plural} from FoundryVTT`,
+    name: `get_${plural}`,
+    description: `List ${plural} from FoundryVTT, one page at a time. Responds with { total, offset, returned, next_offset, documents }: total is the count after the where filter, and next_offset is the offset to pass for the next page (null when nothing is left). By default each document has only summary fields (${summary}); pass requested_fields to choose fields, or ["*"] for full documents. If the first document of a page is larger than max_length, documents is empty and oversized gives its _id, name and bytes; fetch it with requested_fields or get_${config.singular}.`,
     inputSchema: {
       type: "object",
       properties: {
+        limit: {
+          type: "integer",
+          description: `Maximum number of ${plural} in this page. Defaults to ${DEFAULT_LIMIT}; at most ${MAX_LIMIT}.`,
+        },
+        offset: {
+          type: "integer",
+          description: `Number of ${plural} (after the where filter) to skip. Defaults to 0. Use next_offset from the previous response to get the next page.`,
+        },
         max_length: {
           type: "integer",
-          description: `Maximum number of bytes the JSON response can be. ${config.plural.charAt(0).toUpperCase() + config.plural.slice(1)} are removed one by one until under this limit. If 0, undefined, or null, there is no limit.`,
+          description: `Byte budget for this page's documents. Defaults to ${DEFAULT_MAX_LENGTH}. The page is filled in order and stops at the first document that does not fit (next_offset points at it). If the first document alone is over the budget, documents is empty and oversized describes it. 0 means no limit.`,
         },
         requested_fields: {
           type: "array",
           items: { type: "string" },
-          description: `Array of field names to include in each ${config.description} object. Supports dot-notation for nested fields (e.g. "system.aspirations"), which returns just that nested value under its parent. Always includes _id and name. If empty, undefined, or null, all fields are included.`,
+          description: `Array of field names to include in each ${config.description} object. Supports dot-notation for nested fields (e.g. "system.aspirations"), which returns just that nested value under its parent. Always includes _id and name. If empty, undefined, or null, only the summary fields (${summary}) are returned. Use ["*"] to return full documents.`,
         },
         where: {
           type: "object",
           additionalProperties: true,
-          description: `Filter ${config.plural} by field values. Provide key-value pairs to match. All conditions must match (AND logic). Example: {"folder": "abc123"} returns only ${config.plural} in that folder. Example: {"folder": "abc123", "type": "npc"} returns only ${config.plural} matching both conditions.`,
+          description: `Filter ${plural} by field values. Provide key-value pairs to match. All conditions must match (AND logic). Example: {"folder": "abc123"} returns only ${plural} in that folder. Example: {"folder": "abc123", "type": "npc"} returns only ${plural} matching both conditions.`,
         },
+        ...sortProperty,
         ...packProperty(config),
       },
       required: [],
@@ -64,7 +85,7 @@ export function generateGetToolDefinition(config: DocumentTypeConfig) {
         requested_fields: {
           type: "array",
           items: { type: "string" },
-          description: `Array of field names to include in the ${config.description} object. Supports dot-notation for nested fields (e.g. "system.aspirations"), which returns just that nested value under its parent. Always includes _id and name. If empty, undefined, or null, all fields are included.`,
+          description: `Array of field names to include in the ${config.description} object. Supports dot-notation for nested fields (e.g. "system.aspirations"), which returns just that nested value under its parent. Always includes _id and name. If empty, undefined, or null (or ["*"]), all fields are included.`,
         },
         ...packProperty(config),
       },
@@ -381,7 +402,10 @@ function listHandler(config: DocumentTypeConfig): ToolHandlerEntry {
   return {
     verb: `fetching ${config.plural}`,
     run: async (client, args) => {
+      const limit = args?.limit as number | undefined;
+      const offset = args?.offset as number | undefined;
       const maxLength = args?.max_length as number | undefined;
+      const sort = args?.sort as string | undefined;
       const requestedFields = args?.requested_fields as string[] | undefined;
       const where = args?.where as Record<string, unknown> | undefined;
       const pack = args?.pack as string | undefined;
@@ -390,8 +414,15 @@ function listHandler(config: DocumentTypeConfig): ToolHandlerEntry {
         return errorResponse(`Error: ${config.plural} cannot be stored in a compendium`);
       }
 
+      if (sort !== undefined && sort !== "newest" && sort !== "oldest") {
+        return errorResponse('Error: sort must be "newest" or "oldest"');
+      }
+
+      // max_length is passed through as given: omitted means the default budget, 0 means no limit.
       const options = {
-        maxLength: maxLength || null,
+        limit,
+        offset,
+        maxLength,
         requestedFields: requestedFields || null,
         where: where || null,
       };
@@ -399,7 +430,7 @@ function listHandler(config: DocumentTypeConfig): ToolHandlerEntry {
       return successResponse(
         pack
           ? await client.getPackDocuments(config.documentName, pack, options)
-          : await client.getDocuments(config.collection, options)
+          : await client.getDocuments(config.collection, { ...options, sort })
       );
     },
   };

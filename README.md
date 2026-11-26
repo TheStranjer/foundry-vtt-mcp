@@ -128,29 +128,34 @@ Or if installed globally:
 
 ### Document Retrieval (List)
 
-These tools retrieve all documents of a given type from the connected world.
+These tools list the documents of a given type from the connected world, one page at a time.
 
 | Tool | Description |
 |------|-------------|
-| `get_actors` | Get all actors (characters, NPCs, etc.) |
-| `get_items` | Get all items |
-| `get_folders` | Get all folders |
-| `get_users` | Get all users |
-| `get_scenes` | Get all scenes |
-| `get_journals` | Get all journal entries |
-| `get_macros` | Get all macros |
-| `get_cards` | Get all cards |
-| `get_playlists` | Get all playlists |
-| `get_tables` | Get all roll tables |
-| `get_combats` | Get all combats |
-| `get_messages` | Get all chat messages |
-| `get_settings` | Get all settings |
+| `get_actors` | List actors (characters, NPCs, etc.) |
+| `get_items` | List items |
+| `get_folders` | List folders |
+| `get_users` | List users |
+| `get_scenes` | List scenes |
+| `get_journals` | List journal entries |
+| `get_macros` | List macros |
+| `get_cards` | List cards |
+| `get_playlists` | List playlists |
+| `get_tables` | List roll tables |
+| `get_combats` | List combats |
+| `get_messages` | List chat messages |
+| `get_settings` | List settings |
+
+**Response:** `{ total, offset, returned, next_offset, documents }`. `total` is the count after the `where` filter; `next_offset` is the `offset` of the next page, or `null` when nothing is left.
 
 **Parameters:**
-- `max_length` (integer, optional): Maximum response size in bytes. Documents are removed from the response until it fits within this limit.
-- `requested_fields` (string[], optional): Specific fields to include. Supports dot-notation for nested fields (e.g. `system.attributes.hp`). Always includes `_id` and `name`. If omitted, all fields are returned. See [Selecting nested fields](#selecting-nested-fields) below.
+- `limit` (integer, optional): Page size. Defaults to 100, maximum 1000.
+- `offset` (integer, optional): Number of documents to skip. Defaults to 0. Pass `next_offset` from the previous response to read the next page.
+- `max_length` (integer, optional): Byte budget for the page's documents. Defaults to 200000; `0` means no limit. The page is filled in order and stops at the first document that does not fit (`next_offset` points at it). If the page's first document alone exceeds the budget, `documents` is empty and `oversized` (`{ _id, name, bytes }`) names it, with a hint to fetch it using `requested_fields` or the singular tool.
+- `requested_fields` (string[], optional): Specific fields to include. Supports dot-notation for nested fields (e.g. `system.attributes.hp`). Always includes `_id` and `name`. If omitted or empty, only summary fields are returned: `_id`, `name`, `type`, `folder` by default; `_id`, `timestamp`, `speaker.alias`, `author` for messages; `_id`, `key` for settings; `_id`, `name`, `role` for users. Use `["*"]` for full documents. See [Selecting nested fields](#selecting-nested-fields) below.
+- `sort` (string, optional, `get_messages` only): `"newest"` (default) or `"oldest"`, ordered by `timestamp`.
 - `where` (object, optional): Filter documents by field values. See [Filtering with `where`](#filtering-with-where) below.
-- `pack` (string, optional): Read from a compendium pack instead of the world (e.g. `my-module.items`). Only available on `get_actors`, `get_items`, `get_scenes`, `get_journals`, `get_macros`, `get_cards`, `get_playlists` and `get_tables`, and the pack must hold that document type. Use [`get_compendiums`](#get_compendiums) to find pack IDs. `max_length`, `requested_fields` and `where` work the same way on compendium results.
+- `pack` (string, optional): Read from a compendium pack instead of the world (e.g. `my-module.items`). Only available on `get_actors`, `get_items`, `get_scenes`, `get_journals`, `get_macros`, `get_cards`, `get_playlists` and `get_tables`, and the pack must hold that document type. Use [`get_compendiums`](#get_compendiums) to find pack IDs. `limit`, `offset`, `max_length`, `requested_fields` and `where` work the same way on compendium results.
 
 ### Document Retrieval (Single)
 
@@ -390,16 +395,18 @@ Specifics worth knowing:
 
 ### Response Size Management
 
-When working with large worlds, use `max_length` and `requested_fields` to limit response sizes:
+List tools never return a whole large collection at once. Each response is one page (100 documents and 200000 bytes at most by default) of summary fields, and `next_offset` tells you where to continue:
 
 ```json
 {
+  "limit": 50,
+  "offset": 100,
   "max_length": 10000,
   "requested_fields": ["name", "type", "system.attributes.hp"]
 }
 ```
 
-`max_length` applies to list tools only, and drops whole documents from the end of the response until it fits. Narrowing `requested_fields` shrinks every document instead, so the two combine well.
+`max_length` is a byte budget for the page's documents. The page is filled in order and ends at the first document that does not fit, so a smaller budget gives shorter pages, never missing documents: keep following `next_offset`. If the first document alone is over the budget, you get `documents: []` plus `oversized` (`_id`, `name`, `bytes`) and `next_offset` pointing at that document; fetch it with `requested_fields` or the singular tool, then continue from `offset + 1`. `max_length: 0` removes the budget. Narrowing `requested_fields` shrinks every document, so the two combine well.
 
 ## How It Works
 

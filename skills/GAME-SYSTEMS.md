@@ -122,6 +122,8 @@ Actor.system.attributes.*.value
 }
 ```
 
+The response is a page: `{ total, offset, returned, next_offset, documents }`. Without `requested_fields`, only summary fields (`_id`, `name`, `type`, `folder`) come back.
+
 ### Create Token on Scene
 
 Tokens are embedded in Scenes. Modify the scene to add tokens:
