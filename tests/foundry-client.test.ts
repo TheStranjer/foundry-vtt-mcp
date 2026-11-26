@@ -989,12 +989,17 @@ describe("FoundryClient", () => {
     test("getPackDocuments sends no index when full documents are requested", async () => {
       const { client } = createClient();
       jest.spyOn(client, "requestWorldData").mockResolvedValue({ packs: worldPacks });
-      const send = jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({ result: [] });
+      const send = jest
+        .spyOn(client as any, "sendModifyDocumentRequest")
+        .mockResolvedValueOnce({ result: [{ _id: "a", name: "A" }] })
+        .mockResolvedValue({ result: [{ _id: "a", name: "A", system: {} }] });
 
       await client.getPackDocuments("Item", "world.my-items", { requestedFields: ["*"] });
 
-      const operation = send.mock.calls[0][2] as any;
-      expect(operation.index).toBe(false);
+      // The index request over the pack, then one unindexed request for the page's document.
+      expect((send.mock.calls[0][2] as any).indexFields).toEqual(["_id", "name"]);
+      const operation = send.mock.calls[1][2] as any;
+      expect(operation).toMatchObject({ query: { _id: "a" }, index: false });
       expect(operation).not.toHaveProperty("indexFields");
     });
 
@@ -1287,7 +1292,9 @@ describe("FoundryClient", () => {
       await client.getDocuments("actors", { where: { type: "npc" }, requestedFields: ["*"] });
       await client.getDocument("actors", { _id: "1" });
 
-      for (const call of get.mock.calls) {
+      // Full documents are fetched unindexed, after one index request for _id plus the where keys.
+      expect(get.mock.calls[0][2]).toMatchObject({ index: true, indexFields: ["_id", "name", "type"] });
+      for (const call of get.mock.calls.slice(1)) {
         expect(call[2]).toMatchObject({ index: false });
         expect(call[2]).not.toHaveProperty("indexFields");
       }

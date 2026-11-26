@@ -19,6 +19,7 @@ import {
   filterDocumentsByWhere,
   buildWhereHint,
   pageDocuments,
+  pageFullDocuments,
   pickDocument,
   resolvePageParams,
   shapeDocuments,
@@ -1242,12 +1243,17 @@ export class FoundryClient {
     if (sortField) {
       page = await this.getSortedPage(collection, sortField, options?.sort ?? "newest", fields, where, params);
     } else {
-      const docs = await this.queryWorldDocuments(
-        collection,
-        whereToServerQuery(where),
-        buildIndexFields(fields, where)
-      );
-      page = pageDocuments(shapeDocuments(docs, { where, requestedFields: fields }), params);
+      const serverQuery = whereToServerQuery(where);
+      if (fields) {
+        const docs = await this.queryWorldDocuments(collection, serverQuery, buildIndexFields(fields, where));
+        page = pageDocuments(shapeDocuments(docs, { where, requestedFields: fields }), params);
+      } else {
+        // Full documents: index the collection, then fetch only the page's documents.
+        const index = await this.queryWorldDocuments(collection, serverQuery, buildIndexFields(["_id"], where));
+        page = await pageFullDocuments(filterDocumentsByWhere(index, where), params, (id) =>
+          this.fetchWorldDocument(collection, id)
+        );
+      }
     }
 
     return this.withWhereHint(page, where, (indexFields) => this.queryWorldDocuments(collection, {}, indexFields));
@@ -1277,9 +1283,9 @@ export class FoundryClient {
    * cut and budgeted locally.
    *
    * With full documents (`["*"]`) an indexed request returns only _id and the sort field, and
-   * the page's documents are then read one at a time, stopping once the byte budget is full.
-   * Foundry's query matches fields exactly and the code has no evidence of an `$in`-style
-   * operator, so several ids cannot be fetched in one request.
+   * the page's documents are then read one at a time, stopping once the byte budget is full
+   * (see pageFullDocuments). Foundry's query matches fields exactly and the code has no evidence
+   * of an `$in`-style operator, so several ids cannot be fetched in one request.
    */
   private async getSortedPage(
     collection: string,
@@ -1307,23 +1313,23 @@ export class FoundryClient {
 
     const order = await this.queryWorldDocuments(collection, serverQuery, buildIndexFields([sortField], where));
     const sorted = sortDocuments(filterDocumentsByWhere(order, where), sortField, ascending);
-    const pageIds = sorted.slice(params.offset, params.offset + params.limit).map((doc) => String(doc._id));
+    return pageFullDocuments(sorted, params, (id) => this.fetchWorldDocument(collection, id));
+  }
 
-    const documents: Record<string, unknown>[] = [];
-    let used = 2; // "[]"
-    for (const id of pageIds) {
-      const docs = await this.queryWorldDocuments(collection, { _id: id }, null);
-      const doc = docs.find((candidate) => candidate._id === id);
-      if (!doc) continue;
-      documents.push(doc);
-      if (params.maxLength > 0) {
-        used += Buffer.byteLength(JSON.stringify(doc), "utf-8") + (documents.length > 1 ? 1 : 0);
-        // This document did not fit (or is oversized): buildPage drops it, and so would any later one.
-        if (used > params.maxLength) break;
-      }
-    }
+  /** One full world document by id, or undefined when it no longer exists. */
+  private async fetchWorldDocument(collection: string, id: string): Promise<Record<string, unknown> | undefined> {
+    const docs = await this.queryWorldDocuments(collection, { _id: id }, null);
+    return docs.find((candidate) => candidate._id === id);
+  }
 
-    return buildPage(documents, sorted.length, params.offset, params.maxLength);
+  /** One full compendium document by id, or undefined when it no longer exists. */
+  private async fetchPackDocumentById(
+    documentName: string,
+    pack: string,
+    id: string
+  ): Promise<Record<string, unknown> | undefined> {
+    const docs = await this.fetchPackDocuments(documentName, pack, { _id: id }, null);
+    return docs.find((candidate) => candidate._id === id);
   }
 
   /**
@@ -1389,13 +1395,23 @@ export class FoundryClient {
     const params = resolvePageParams(options);
     const requestedFields = resolveRequestedFields(options?.requestedFields, summaryFieldsForDocumentName(documentName));
     const where = options?.where ?? null;
-    const docs = await this.fetchPackDocuments(
-      documentName,
-      pack,
-      options?.query ?? {},
-      buildIndexFields(requestedFields, where)
-    );
-    const page = pageDocuments(shapeDocuments(docs, { where, requestedFields }), params);
+    const query = options?.query ?? {};
+    let page: DocumentPage;
+    if (requestedFields) {
+      const docs = await this.fetchPackDocuments(
+        documentName,
+        pack,
+        query,
+        buildIndexFields(requestedFields, where)
+      );
+      page = pageDocuments(shapeDocuments(docs, { where, requestedFields }), params);
+    } else {
+      // Full documents: index the pack, then fetch only the page's documents.
+      const index = await this.fetchPackDocuments(documentName, pack, query, buildIndexFields(["_id"], where));
+      page = await pageFullDocuments(filterDocumentsByWhere(index, where), params, (id) =>
+        this.fetchPackDocumentById(documentName, pack, id)
+      );
+    }
     return this.withWhereHint(page, where, (indexFields) =>
       this.fetchPackDocuments(documentName, pack, {}, indexFields)
     );
