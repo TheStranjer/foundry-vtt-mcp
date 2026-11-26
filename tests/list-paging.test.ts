@@ -228,14 +228,15 @@ describe("summary fields", () => {
     expect(fetch.mock.calls[0][1]).toMatchObject({ index: true, indexFields: ["_id", "name", "type", "folder"] });
   });
 
-  test('["*"] returns full documents with no index', async () => {
+  test('["*"] indexes _id first, then returns full documents with no index', async () => {
     const client = createClient();
     const full = [{ _id: "1", name: "A", type: "npc", system: { hp: 1 } }];
     const query = jest.spyOn(client as any, "queryWorldDocuments").mockResolvedValue(full);
 
     const page = await client.getDocuments("actors", { requestedFields: ["*"] });
 
-    expect(query.mock.calls[0][2]).toBeNull();
+    expect(query.mock.calls[0][2]).toEqual(["_id", "name"]);
+    expect(query.mock.calls[1]).toEqual(["actors", { _id: "1" }, null]);
     expect(page.documents).toEqual(full);
   });
 
@@ -588,5 +589,108 @@ describe("buildWhereHint", () => {
   test("numbers and booleans stay JSON values, strings sort first", () => {
     const docs = [{ _id: "a", v: true }, { _id: "b", v: 2 }, { _id: "c", v: "s" }, { _id: "d", v: null }];
     expect(buildWhereHint(docs, { v: 0 }).v).toEqual(["s", 2, null, true]);
+  });
+});
+
+describe("full-document lists fetch only the page", () => {
+  const rows = Array.from({ length: 54 }, (_, i) => ({
+    _id: `a${String(i).padStart(2, "0")}`,
+    name: `Actor ${i}`,
+    type: i % 2 === 0 ? "npc" : "character",
+    system: { blob: "x".repeat(40) },
+  }));
+
+  function worldClient() {
+    const client = createClient();
+    const send = jest.spyOn(client as any, "sendGetRequest").mockImplementation(async (...args: unknown[]) => {
+      const op = args[1] as { query: Record<string, unknown>; index?: boolean; indexFields?: string[] };
+      const matching = rows.filter((r) => Object.entries(op.query).every(([k, v]) => (r as any)[k] === v));
+      return { result: op.index ? matching.map((r) => filterDocumentFields(r, op.indexFields ?? null)) : matching };
+    });
+    return { client, send, ops: () => send.mock.calls.map((call) => call[1] as any) };
+  }
+
+  test("a page of N documents is one index request plus N page requests", async () => {
+    const { client, ops } = worldClient();
+    const page = await client.getDocuments("actors", { limit: 3, offset: 2, requestedFields: ["*"], maxLength: 0 });
+    expect(ops()).toHaveLength(4);
+    expect(ops()[0]).toMatchObject({ index: true, indexFields: ["_id", "name"], query: {} });
+    expect(ops().slice(1).map((op) => op.query)).toEqual([{ _id: "a02" }, { _id: "a03" }, { _id: "a04" }]);
+    expect(ops().slice(1).every((op) => op.index === false)).toBe(true);
+    expect(page.documents).toEqual(rows.slice(2, 5));
+    expect(page).toMatchObject({ total: 54, offset: 2, returned: 3, next_offset: 5 });
+  });
+
+  test("the where key is indexed, filtered locally and total counts the filtered list", async () => {
+    const { client, ops } = worldClient();
+    const page = await client.getDocuments("actors", { limit: 2, requestedFields: ["*"], where: { type: "npc" } });
+    expect(ops()[0]).toMatchObject({ index: true, indexFields: ["_id", "name", "type"], query: { type: "npc" } });
+    expect(ops()).toHaveLength(3);
+    expect(page).toMatchObject({ total: 27, returned: 2, next_offset: 2 });
+    expect(page.documents.map((d) => d._id)).toEqual(["a00", "a02"]);
+  });
+
+  test("the budget stops fetching as soon as it is full", async () => {
+    const { client, ops } = worldClient();
+    const page = await client.getDocuments("actors", {
+      limit: 50,
+      requestedFields: ["*"],
+      maxLength: bytes(rows.slice(0, 2)) + 5,
+    });
+    // index + two that fit + the one that did not
+    expect(ops()).toHaveLength(4);
+    expect(page).toMatchObject({ total: 54, returned: 2, next_offset: 2 });
+  });
+
+  test("an oversized first document is reported and only it is fetched", async () => {
+    const { client, ops } = worldClient();
+    const page = await client.getDocuments("actors", { limit: 2, requestedFields: ["*"], maxLength: 1000 - 950 });
+    expect(ops()).toHaveLength(2);
+    expect(page.documents).toEqual([]);
+    expect(page.oversized).toEqual({ _id: "a00", name: "Actor 0", bytes: bytes(rows[0]) });
+    expect(page.next_offset).toBe(1);
+  });
+
+  test("results match the whole-collection implementation for the same data", async () => {
+    const { client } = worldClient();
+    const params = { limit: 4, offset: 10, maxLength: bytes(rows.slice(0, 3)) };
+    const expected = pageDocuments(rows.filter((r) => r.type === "character"), params);
+    const page = await client.getDocuments("actors", {
+      limit: 4,
+      offset: 10,
+      maxLength: params.maxLength,
+      requestedFields: ["*"],
+      where: { type: "character" },
+    });
+    expect(page).toEqual(expected);
+  });
+
+  test("a document deleted since the index is skipped", async () => {
+    const client = createClient();
+    jest.spyOn(client as any, "queryWorldDocuments").mockImplementation(async (...args: unknown[]) => {
+      const query = args[1] as { _id?: string };
+      if (!query._id) return [{ _id: "x" }, { _id: "y" }];
+      return query._id === "y" ? [{ _id: "y", name: "Y" }] : [];
+    });
+    const page = await client.getDocuments("actors", { requestedFields: ["*"] });
+    expect(page.documents).toEqual([{ _id: "y", name: "Y" }]);
+    expect(page.total).toBe(2);
+  });
+
+  test("compendium packs fetch only the page after one index request", async () => {
+    const client = createClient();
+    jest.spyOn(client as any, "loadWorldSnapshot").mockResolvedValue({ packs: [{ id: "w.p", type: "Actor" }] });
+    const send = jest.spyOn(client as any, "sendGetRequest").mockImplementation(async (...args: unknown[]) => {
+      const op = args[1] as { query: { _id?: string }; index?: boolean; indexFields?: string[] };
+      const matching = op.query._id ? rows.filter((r) => r._id === op.query._id) : rows;
+      return { result: op.index ? matching.map((r) => filterDocumentFields(r, op.indexFields ?? null)) : matching };
+    });
+    const page = await client.getPackDocuments("Actor", "w.p", { limit: 2, offset: 1, requestedFields: ["*"] });
+    const ops = send.mock.calls.map((call) => call[1] as any);
+    expect(ops).toHaveLength(3);
+    expect(ops[0]).toMatchObject({ pack: "w.p", index: true, indexFields: ["_id", "name"] });
+    expect(ops.slice(1).map((op) => op.query)).toEqual([{ _id: "a01" }, { _id: "a02" }]);
+    expect(page.documents).toEqual(rows.slice(1, 3));
+    expect(page).toMatchObject({ total: 54, offset: 1, returned: 2, next_offset: 3 });
   });
 });

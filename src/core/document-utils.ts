@@ -271,6 +271,47 @@ export function buildPage(
   return page;
 }
 
+/**
+ * Fetch a page's full documents one at a time, in page order, and stop as soon as the byte
+ * budget (the size of the JSON array) is full. `ids` are the page's documents, already
+ * where-filtered, sorted and cut to the limit. The first document that does not fit is the last
+ * one fetched: buildPage then drops it (or reports it as oversized), as it would any later one.
+ * Requests are sequential (one in flight): running them concurrently would fetch documents past
+ * the budget. A document `fetchOne` cannot find (deleted since the index) is skipped.
+ */
+export async function fetchPageDocuments(
+  ids: string[],
+  maxLength: number,
+  fetchOne: (id: string) => Promise<Record<string, unknown> | undefined>
+): Promise<Record<string, unknown>[]> {
+  const documents: Record<string, unknown>[] = [];
+  let used = 2; // "[]"
+  for (const id of ids) {
+    const doc = await fetchOne(id);
+    if (!doc) continue;
+    documents.push(doc);
+    if (maxLength > 0) {
+      used += Buffer.byteLength(JSON.stringify(doc), "utf-8") + (documents.length > 1 ? 1 : 0);
+      if (used > maxLength) break;
+    }
+  }
+  return documents;
+}
+
+/**
+ * Page a where-filtered, ordered index list (`_id` plus the where/sort fields) whose full
+ * documents are fetched only for the page, via `fetchOne`. `total` is the index list's length.
+ */
+export async function pageFullDocuments(
+  index: Record<string, unknown>[],
+  params: PageParams,
+  fetchOne: (id: string) => Promise<Record<string, unknown> | undefined>
+): Promise<DocumentPage> {
+  const ids = index.slice(params.offset, params.offset + params.limit).map((doc) => String(doc._id));
+  const documents = await fetchPageDocuments(ids, params.maxLength, fetchOne);
+  return buildPage(documents, index.length, params.offset, params.maxLength);
+}
+
 /** Page a fully loaded, where-filtered document list: slice by offset/limit, then apply the budget. */
 export function pageDocuments(docs: Record<string, unknown>[], params: PageParams): DocumentPage {
   return buildPage(docs.slice(params.offset, params.offset + params.limit), docs.length, params.offset, params.maxLength);
