@@ -73,6 +73,36 @@ const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000, 30000, 60000];
 /** Silence allowed on an HTTP request. A server can accept it and then never answer. */
 const REQUEST_TIMEOUT_MS = 10000;
 
+/** Silence allowed on a file upload or download, which can pause longer than a small API call. */
+const TRANSFER_TIMEOUT_MS = 60000;
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** A request made through {@link FoundryClient.httpsRequest}. */
+export interface HttpsRequestOptions {
+  hostname: string;
+  path: string;
+  method: string;
+  headers?: Record<string, string | number>;
+  body?: string | Buffer;
+  allowInsecureTls?: boolean;
+  /** Silence allowed before the request is destroyed. Defaults to REQUEST_TIMEOUT_MS. */
+  timeoutMs?: number;
+  /** Defaults to 443, or 80 for the "http" protocol. */
+  port?: number | string;
+  /** Defaults to "https". "http" goes through the injected http module. */
+  protocol?: "https" | "http";
+}
+
+/** A fully read HTTP response. */
+export interface HttpsResponse {
+  statusCode: number | undefined;
+  headers: http.IncomingHttpHeaders;
+  body: Buffer;
+}
+
 export class FoundryClient {
   private connection: FoundryConnection | null = null;
   /** The attempt in progress; everyone who needs a reconnection waits on the same one. */
@@ -85,6 +115,7 @@ export class FoundryClient {
   private wsLogger: WebSocketLogger;
   private fs: Pick<typeof fs, "readFileSync">;
   private https: Pick<typeof https, "request">;
+  private http: Pick<typeof http, "request">;
   private crypto: Pick<typeof crypto, "randomBytes">;
   private WebSocketCtor: typeof WebSocket;
   private now: () => number;
@@ -97,6 +128,7 @@ export class FoundryClient {
     deps: {
       fs?: Pick<typeof fs, "readFileSync">;
       https?: Pick<typeof https, "request">;
+      http?: Pick<typeof http, "request">;
       crypto?: Pick<typeof crypto, "randomBytes">;
       WebSocketCtor?: typeof WebSocket;
       wsLogger?: WebSocketLogger;
@@ -110,6 +142,7 @@ export class FoundryClient {
     this.wsLogger = deps.wsLogger || new WebSocketLogger();
     this.fs = deps.fs || fs;
     this.https = deps.https || https;
+    this.http = deps.http || http;
     this.crypto = deps.crypto || crypto;
     this.WebSocketCtor = deps.WebSocketCtor || WebSocket;
     this.now = deps.now || (() => Date.now());
@@ -140,11 +173,78 @@ export class FoundryClient {
     return this.crypto.randomBytes(12).toString("hex");
   }
 
-  /** Fail a request that goes silent, which surfaces through its "error" event. */
-  private failOnTimeout(req: http.ClientRequest): void {
-    req.on("timeout", () => {
-      req.destroy(new Error(`no response for ${REQUEST_TIMEOUT_MS / 1000}s`));
+  /**
+   * Make one HTTP(S) request and read the whole response. Rejects on a request
+   * or response error, and on silence longer than `timeoutMs`, which destroys
+   * the request with a "no response for Ns" error. Any status code resolves.
+   */
+  private httpsRequest(options: HttpsRequestOptions): Promise<HttpsResponse> {
+    const {
+      hostname,
+      path,
+      method,
+      headers,
+      body,
+      allowInsecureTls = false,
+      timeoutMs = REQUEST_TIMEOUT_MS,
+      protocol = "https",
+    } = options;
+    const isHttps = protocol === "https";
+    const port = options.port ?? (isHttps ? 443 : 80);
+
+    return new Promise((resolve, reject) => {
+      const requestOptions: http.RequestOptions = {
+        hostname,
+        port,
+        path,
+        method,
+        timeout: timeoutMs,
+        ...(isHttps && allowInsecureTls && { rejectUnauthorized: false }),
+        ...((headers || body !== undefined) && {
+          headers: {
+            ...headers,
+            ...(body !== undefined && { "Content-Length": Buffer.byteLength(body) }),
+          },
+        }),
+      };
+
+      const onResponse = (res: http.IncomingMessage) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer | string) => {
+          chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+        });
+        res.on("end", () => {
+          resolve({
+            statusCode: res.statusCode,
+            headers: res.headers ?? {},
+            body: Buffer.concat(chunks),
+          });
+        });
+        res.on("error", reject);
+      };
+
+      const req = isHttps
+        ? this.https.request(requestOptions, onResponse)
+        : this.http.request(requestOptions, onResponse);
+
+      req.on("timeout", () => {
+        req.destroy(new Error(`no response for ${timeoutMs / 1000}s`));
+      });
+      req.on("error", reject);
+
+      if (body !== undefined) {
+        req.write(body);
+      }
+      req.end();
     });
+  }
+
+  /** The Cookie and Origin headers Foundry expects on a POST (v14 rejects one without its own Origin). */
+  private sessionHeaders(hostname: string, sessionId: string): Record<string, string> {
+    return {
+      Cookie: `session=${sessionId}`,
+      Origin: `https://${hostname}`,
+    };
   }
 
   /**
@@ -158,42 +258,24 @@ export class FoundryClient {
     hostname: string,
     allowInsecureTls = false
   ): Promise<number | null> {
-    return new Promise((resolve) => {
-      const req = this.https.request(
-        {
-          hostname,
-          port: 443,
-          path: "/api/status",
-          method: "GET",
-          timeout: REQUEST_TIMEOUT_MS,
-          ...(allowInsecureTls && { rejectUnauthorized: false }),
-        },
-        (res) => {
-          let data = "";
-          res.on("data", (chunk) => {
-            data += chunk;
-          });
-          res.on("end", () => {
-            const generation = parseFoundryGeneration(data);
-            this.logger.error(
-              `[FoundryClient] Detected Foundry generation for ${hostname}: ${generation ?? "unknown"}`
-            );
-            resolve(generation);
-          });
-          res.on("error", () => resolve(null));
-        }
-      );
-
-      this.failOnTimeout(req);
-      req.on("error", (error) => {
-        this.logger.error(
-          `[FoundryClient] Could not detect Foundry version for ${hostname}: ${error.message}`
-        );
-        resolve(null);
+    try {
+      const res = await this.httpsRequest({
+        hostname,
+        path: "/api/status",
+        method: "GET",
+        allowInsecureTls,
       });
-
-      req.end();
-    });
+      const generation = parseFoundryGeneration(res.body.toString("utf-8"));
+      this.logger.error(
+        `[FoundryClient] Detected Foundry generation for ${hostname}: ${generation ?? "unknown"}`
+      );
+      return generation;
+    } catch (error) {
+      this.logger.error(
+        `[FoundryClient] Could not detect Foundry version for ${hostname}: ${errorMessage(error)}`
+      );
+      return null;
+    }
   }
 
   /**
@@ -203,29 +285,20 @@ export class FoundryClient {
     hostname: string,
     allowInsecureTls = false
   ): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const req = this.https.request(
-        {
-          hostname,
-          port: 443,
-          path: "/join",
-          method: "GET",
-          timeout: REQUEST_TIMEOUT_MS,
-          ...(allowInsecureTls && { rejectUnauthorized: false }),
-        },
-        (res) => {
-          const sessionId = extractSessionIdFromCookies(res.headers["set-cookie"]);
-          resolve(sessionId || this.generateSessionId());
-        }
-      );
-
-      this.failOnTimeout(req);
-      req.on("error", (error) => {
-        reject(new Error(`GET /join failed for ${hostname}: ${error.message}`));
+    try {
+      const res = await this.httpsRequest({
+        hostname,
+        path: "/join",
+        method: "GET",
+        allowInsecureTls,
       });
-
-      req.end();
-    });
+      const sessionId = extractSessionIdFromCookies(res.headers["set-cookie"]);
+      return sessionId || this.generateSessionId();
+    } catch (error) {
+      throw new Error(`GET /join failed for ${hostname}: ${errorMessage(error)}`, {
+        cause: error,
+      });
+    }
   }
 
   /**
@@ -236,60 +309,38 @@ export class FoundryClient {
     sessionId: string,
     credential: FoundryCredential
   ): Promise<boolean> {
-    return new Promise((resolve, reject) => {
-      const payload = buildJoinPayload(credential);
-
-      const req = this.https.request(
-        {
-          hostname,
-          port: 443,
-          path: "/join",
-          method: "POST",
-          timeout: REQUEST_TIMEOUT_MS,
-          ...(credential.allow_insecure_tls && { rejectUnauthorized: false }),
-          headers: {
-            "Content-Type": "application/json",
-            "Content-Length": Buffer.byteLength(payload),
-            Cookie: `session=${sessionId}`,
-            Origin: `https://${hostname}`,
-          },
+    let res: HttpsResponse;
+    try {
+      res = await this.httpsRequest({
+        hostname,
+        path: "/join",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...this.sessionHeaders(hostname, sessionId),
         },
-        (res) => {
-          let data = "";
-          res.on("data", (chunk) => {
-            data += chunk;
-          });
-          res.on("end", () => {
-            const parsed = parseJoinResponse(res.statusCode, data);
-            if (parsed.success) {
-              this.logger.error(
-                `[FoundryClient] Authentication successful: ${parsed.message || ""}`.trim()
-              );
-              resolve(true);
-              return;
-            }
-
-            this.logger.error(
-              `[FoundryClient] Authentication failed for ${hostname}: ${res.statusCode} - ${data}`
-            );
-            resolve(false);
-          });
-          res.on("error", (error) => {
-            reject(new Error(`POST /join failed for ${hostname}: ${error.message}`));
-          });
-        }
-      );
-
-      this.failOnTimeout(req);
-      req.on("error", (error) => {
-        reject(
-          new Error(`POST /join failed for ${hostname}: ${error.message}`)
-        );
+        body: buildJoinPayload(credential),
+        allowInsecureTls: credential.allow_insecure_tls,
       });
+    } catch (error) {
+      throw new Error(`POST /join failed for ${hostname}: ${errorMessage(error)}`, {
+        cause: error,
+      });
+    }
 
-      req.write(payload);
-      req.end();
-    });
+    const data = res.body.toString("utf-8");
+    const parsed = parseJoinResponse(res.statusCode, data);
+    if (parsed.success) {
+      this.logger.error(
+        `[FoundryClient] Authentication successful: ${parsed.message || ""}`.trim()
+      );
+      return true;
+    }
+
+    this.logger.error(
+      `[FoundryClient] Authentication failed for ${hostname}: ${res.statusCode} - ${data}`
+    );
+    return false;
   }
 
   /**
@@ -1491,111 +1542,83 @@ export class FoundryClient {
       contentType,
     });
 
-    return new Promise((resolve, reject) => {
-      const req = this.https.request(
-        {
-          hostname: this.connection!.hostname,
-          port: 443,
-          path: "/upload",
-          method: "POST",
-          ...(this.connection!.credential.allow_insecure_tls && {
-            rejectUnauthorized: false,
-          }),
-          headers: {
-            "Content-Type": `multipart/form-data; boundary=${boundary}`,
-            "Content-Length": Buffer.byteLength(formData),
-            Cookie: `session=${this.connection!.sessionId}`,
-            // Foundry v14 rejects POSTs without its own Origin (400), as on /join.
-            Origin: `https://${this.connection!.hostname}`,
-          },
+    const { hostname, sessionId, credential } = this.connection;
+    let res: HttpsResponse;
+    try {
+      res = await this.httpsRequest({
+        hostname,
+        path: "/upload",
+        method: "POST",
+        headers: {
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+          ...this.sessionHeaders(hostname, sessionId),
         },
-        (res) => {
-          let data = "";
-          res.on("data", (chunk) => {
-            data += chunk;
-          });
-          res.on("end", () => {
-            try {
-              const parsed = JSON.parse(data);
-              if (parsed.error) {
-                reject(new Error(`Upload failed: ${parsed.error}`));
-                return;
-              }
-              resolve({
-                path: parsed.path || `${target}/${filename}`,
-                message: parsed.message,
-              });
-            } catch {
-              if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-                resolve({
-                  path: `${target}/${filename}`,
-                  message: "Upload completed",
-                });
-              } else {
-                reject(new Error(`Upload failed with status ${res.statusCode}: ${data}`));
-              }
-            }
-          });
-        }
-      );
-
-      req.on("error", (error) => {
-        reject(new Error(`Upload request failed: ${error.message}`));
+        body: formData,
+        allowInsecureTls: credential.allow_insecure_tls,
+        timeoutMs: TRANSFER_TIMEOUT_MS,
       });
+    } catch (error) {
+      throw new Error(`Upload request failed: ${errorMessage(error)}`, { cause: error });
+    }
 
-      req.write(formData);
-      req.end();
-    });
+    const data = res.body.toString("utf-8");
+    let parsed: { path?: string; message?: string; error?: string } | undefined;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      parsed = undefined;
+    }
+
+    if (parsed) {
+      if (parsed.error) {
+        throw new Error(`Upload failed: ${parsed.error}`);
+      }
+      return {
+        path: parsed.path || `${target}/${filename}`,
+        message: parsed.message,
+      };
+    }
+    if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+      return {
+        path: `${target}/${filename}`,
+        message: "Upload completed",
+      };
+    }
+    throw new Error(`Upload failed with status ${res.statusCode}: ${data}`);
   }
 
   /**
    * Download a file from a URL
    */
-  private downloadFile(url: string): Promise<{ buffer: Buffer; contentType: string }> {
-    return new Promise((resolve, reject) => {
-      const parsedUrl = new URL(url);
-      const isHttps = parsedUrl.protocol === "https:";
+  private async downloadFile(url: string): Promise<{ buffer: Buffer; contentType: string }> {
+    const parsedUrl = new URL(url);
+    const isHttps = parsedUrl.protocol === "https:";
 
-      const requestOptions: http.RequestOptions = {
+    let res: HttpsResponse;
+    try {
+      res = await this.httpsRequest({
         hostname: parsedUrl.hostname,
-        port: parsedUrl.port || (isHttps ? 443 : 80),
+        port: parsedUrl.port || undefined,
         path: parsedUrl.pathname + parsedUrl.search,
         method: "GET",
-      };
-
-      const handleResponse = (res: http.IncomingMessage) => {
-        // Handle redirects
-        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          this.downloadFile(res.headers.location).then(resolve).catch(reject);
-          return;
-        }
-
-        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-          reject(new Error(`Failed to download file: HTTP ${res.statusCode}`));
-          return;
-        }
-
-        const chunks: Buffer[] = [];
-        res.on("data", (chunk: Buffer) => {
-          chunks.push(chunk);
-        });
-        res.on("end", () => {
-          const buffer = Buffer.concat(chunks);
-          const contentType = (res.headers["content-type"] as string) || "application/octet-stream";
-          resolve({ buffer, contentType });
-        });
-      };
-
-      const req = isHttps
-        ? this.https.request(requestOptions, handleResponse)
-        : http.request(requestOptions, handleResponse);
-
-      req.on("error", (error: Error) => {
-        reject(new Error(`Failed to download file: ${error.message}`));
+        protocol: isHttps ? "https" : "http",
+        timeoutMs: TRANSFER_TIMEOUT_MS,
       });
+    } catch (error) {
+      throw new Error(`Failed to download file: ${errorMessage(error)}`, { cause: error });
+    }
 
-      req.end();
-    });
+    // Handle redirects
+    if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+      return this.downloadFile(new URL(res.headers.location, url).href);
+    }
+
+    if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+      throw new Error(`Failed to download file: HTTP ${res.statusCode}`);
+    }
+
+    const contentType = (res.headers["content-type"] as string) || "application/octet-stream";
+    return { buffer: res.body, contentType };
   }
 
   /**
