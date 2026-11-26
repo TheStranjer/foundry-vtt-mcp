@@ -995,6 +995,20 @@ export class FoundryClient {
       logLabel
     );
 
+    return this.throwOnFoundryError(response);
+  }
+
+  /**
+   * Send a modifyDocument write (update/create/delete) and throw on a Foundry-side error,
+   * so permission/validation failures surface as tool errors rather than successes.
+   */
+  private async sendWriteRequest(
+    ...args: Parameters<FoundryClient["sendModifyDocumentRequest"]>
+  ): Promise<Record<string, unknown>> {
+    return this.throwOnFoundryError(await this.sendModifyDocumentRequest(...args));
+  }
+
+  private throwOnFoundryError(response: Record<string, unknown>): Record<string, unknown> {
     if (response.error) {
       const error = response.error as { message?: unknown };
       throw new Error(typeof error.message === "string" ? error.message : String(response.error));
@@ -1246,7 +1260,7 @@ export class FoundryClient {
       options
     );
 
-    return this.sendModifyDocumentRequest(
+    return this.sendWriteRequest(
       type,
       "update",
       operation,
@@ -1292,7 +1306,7 @@ export class FoundryClient {
       options
     );
 
-    return this.sendModifyDocumentRequest(
+    return this.sendWriteRequest(
       type,
       "create",
       operation,
@@ -1328,7 +1342,7 @@ export class FoundryClient {
       options
     );
 
-    return this.sendModifyDocumentRequest(
+    return this.sendWriteRequest(
       type,
       "delete",
       operation,
