@@ -156,7 +156,7 @@ export const createDocumentTool = {
 
 export const getWorldTool = {
   name: "get_world",
-  description: `Get world metadata from FoundryVTT. Returns information about the world such as title, system, version, and other metadata. This excludes document collections (actors, items, scenes, etc.) - use get_documents for those.`,
+  description: `Get world metadata from FoundryVTT. Returns information about the world such as title, system, version, and other metadata. This excludes document collections (actors, items, scenes, etc.) - use get_documents or get_document for those.`,
   inputSchema: {
     type: "object",
     properties: {},

@@ -1509,7 +1509,7 @@ export class FoundryClient {
    * @param type - The document type (Actor, Item, Scene, JournalEntry, Folder, User, etc.)
    * @param data - Array of data objects defining the new documents to create.
    *               Each object should contain the fields for the new document.
-   *               The exact field structure depends on the game system - consider using get_* tools
+   *               The exact field structure depends on the game system - consider using get_document
    *               first to retrieve an existing document of the same type to understand the schema.
    * @param options.parentUuid - Optional UUID of the parent document for embedded documents
    * @param options.pack - Optional compendium pack ID to create documents within a compendium

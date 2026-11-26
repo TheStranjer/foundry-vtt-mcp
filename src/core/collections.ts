@@ -15,7 +15,7 @@ export interface DocumentTypeConfig {
 
 const DEFAULT_SUMMARY_FIELDS = ["_id", "name", "type", "folder"];
 
-/** Single source of truth for the world collections the get_* tools read. */
+/** Single source of truth for the world collections the get_documents and get_document tools read. */
 export const DOCUMENT_TYPES: DocumentTypeConfig[] = [
   { singular: "actor", plural: "actors", collection: "actors", description: "actor", documentName: "Actor", packable: true, summaryFields: [...DEFAULT_SUMMARY_FIELDS] },
   { singular: "item", plural: "items", collection: "items", description: "item", documentName: "Item", packable: true, summaryFields: [...DEFAULT_SUMMARY_FIELDS] },
@@ -33,7 +33,7 @@ export const DOCUMENT_TYPES: DocumentTypeConfig[] = [
 ];
 
 /**
- * Foundry document class for each world collection the get_* tools read, derived from
+ * Foundry document class for each world collection the get_documents and get_document tools read, derived from
  * DOCUMENT_TYPES. Lets a read ask the server for one document type (modifyDocument "get")
  * instead of pulling the whole world payload and filtering it locally.
  */

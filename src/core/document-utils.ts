@@ -186,12 +186,13 @@ export function buildPage(
   maxLength: number
 ): DocumentPage {
   const { documents, oversized } = fitToBudget(candidates, maxLength);
-  const end = offset + documents.length;
+  // An oversized first document is skipped over, so the next page starts just after it.
+  const end = oversized ? offset + 1 : offset + documents.length;
   const page: DocumentPage = {
     total,
     offset,
     returned: documents.length,
-    next_offset: oversized ? offset : end < total ? end : null,
+    next_offset: end < total ? end : null,
     documents,
   };
   if (oversized) {
