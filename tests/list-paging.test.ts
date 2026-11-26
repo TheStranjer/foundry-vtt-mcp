@@ -13,7 +13,7 @@ import {
   summaryFieldsForCollection,
   summaryFieldsForDocumentName,
 } from "../src/core/collections.js";
-import { generateListToolDefinition } from "../src/server-tools.js";
+import { getDocumentsTool } from "../src/server-tools.js";
 
 function createClient() {
   const deps = {
@@ -109,7 +109,7 @@ describe("oversized first document", () => {
     expect(page.oversized).toEqual({ _id: "a", name: "Big", bytes: bytes(big[0]) });
     expect(page.next_offset).toBe(0);
     expect(page.hint).toContain("requested_fields");
-    expect(page.hint).toContain("singular");
+    expect(page.hint).toContain("get_document");
   });
 
   test("next_offset is the oversized document's offset", () => {
@@ -346,18 +346,18 @@ describe("message order", () => {
 
 describe("list tool definition", () => {
   test("documents limit, offset, budget and summary fields", () => {
-    const def = generateListToolDefinition(DOCUMENT_TYPES.find((c) => c.plural === "actors")!);
+    const def = getDocumentsTool;
     expect(Object.keys(def.inputSchema.properties)).toEqual(
-      expect.arrayContaining(["limit", "offset", "max_length", "requested_fields", "where", "pack"])
+      expect.arrayContaining(["collection", "limit", "offset", "max_length", "requested_fields", "where", "sort", "pack"])
     );
-    expect(def.inputSchema.properties).not.toHaveProperty("sort");
     expect(def.description).toContain("next_offset");
-    expect(def.description).toContain("_id, name, type, folder");
+    expect(def.inputSchema.properties.requested_fields.description).toContain("_id, name, type, folder");
   });
 
-  test("only messages take sort", () => {
-    const def = generateListToolDefinition(DOCUMENT_TYPES.find((c) => c.plural === "messages")!);
-    expect((def.inputSchema.properties as any).sort.enum).toEqual(["newest", "oldest"]);
+  test("sort is for messages only", () => {
+    const sort = getDocumentsTool.inputSchema.properties.sort;
+    expect(sort.enum).toEqual(["newest", "oldest"]);
+    expect(sort.description).toContain("messages only");
   });
 });
 
@@ -369,8 +369,8 @@ describe("list tool handler", () => {
     const client = { isConnected: () => true, getDocuments: jest.fn().mockResolvedValue(page) } as any;
     const handler = createToolHandler(client);
 
-    await handler({ params: { name: "get_messages", arguments: { limit: 5, offset: 10, sort: "oldest" } } });
-    await handler({ params: { name: "get_messages", arguments: { max_length: 0 } } });
+    await handler({ params: { name: "get_documents", arguments: { collection: "messages", limit: 5, offset: 10, sort: "oldest" } } });
+    await handler({ params: { name: "get_documents", arguments: { collection: "messages", max_length: 0 } } });
 
     expect(client.getDocuments.mock.calls[0][1]).toMatchObject({ limit: 5, offset: 10, sort: "oldest", maxLength: undefined });
     expect(client.getDocuments.mock.calls[1][1]).toMatchObject({ maxLength: 0 });
@@ -379,7 +379,7 @@ describe("list tool handler", () => {
   test("rejects an unknown sort", async () => {
     const { createToolHandler } = await import("../src/server-tools.js");
     const client = { isConnected: () => true, getDocuments: jest.fn() } as any;
-    const response = await createToolHandler(client)({ params: { name: "get_messages", arguments: { sort: "sideways" } } });
+    const response = await createToolHandler(client)({ params: { name: "get_documents", arguments: { collection: "messages", sort: "sideways" } } });
     expect((response as any).isError).toBe(true);
     expect(client.getDocuments).not.toHaveBeenCalled();
   });

@@ -31,30 +31,33 @@ You can read and manipulate these document collections:
 ## Reading Documents
 
 ### List All Documents
-Use `get_actors`, `get_items`, `get_journals`, etc. to list documents of a type, one page at a time. The response is `{ total, offset, returned, next_offset, documents }`: `total` is the count after the `where` filter, and `next_offset` is the `offset` for the next page (`null` when nothing is left).
+Use `get_documents` with a `collection` (`actors`, `items`, `folders`, `users`, `scenes`, `journal`, `macros`, `cards`, `playlists`, `tables`, `combats`, `messages`, `settings`) to list documents of that type, one page at a time. The response is `{ total, offset, returned, next_offset, documents }`: `total` is the count after the `where` filter, and `next_offset` is the `offset` for the next page (`null` when nothing is left).
 
 **Important parameters:**
+- `collection`: Which collection to read (required)
 - `limit`: Page size (default 100, maximum 1000)
 - `offset`: Documents to skip (default 0); pass `next_offset` from the previous page
-- `max_length`: Byte budget for the page's documents (default 200000; `0` means no limit). The page stops at the first document that doesn't fit. If the first document alone is over the budget, `documents` is empty and `oversized` gives its `_id`, `name` and `bytes`: fetch it with `requested_fields` or the singular tool (e.g. `get_actor`)
+- `max_length`: Byte budget for the page's documents (default 200000; `0` means no limit). The page stops at the first document that doesn't fit. If the first document alone is over the budget, `documents` is empty and `oversized` gives its `_id`, `name` and `bytes`: fetch it with `requested_fields` or `get_document`
 - `requested_fields`: Fields to return (always includes `_id` and `name`). Without it you get only summary fields (`_id`, `name`, `type`, `folder` by default; messages: `_id`, `timestamp`, `speaker.alias`, `author`; settings: `_id`, `key`; users: `_id`, `name`, `role`). Use `["*"]` for full documents
 - `where`: Filter by field values (AND logic)
-- `sort` (`get_messages` only): `"newest"` (default) or `"oldest"`, by `timestamp`
+- `pack`: Read from a compendium pack instead of the world; only `actors`, `items`, `scenes`, `journal`, `macros`, `cards`, `playlists` and `tables` can be packed, and the others are rejected
+- `sort` (`messages` only): `"newest"` (default) or `"oldest"`, by `timestamp`
 
-Singular tools (`get_actor`, ...) return the full document unless `requested_fields` is given.
+`get_document` returns the full document unless `requested_fields` is given.
 
 Example - Get all NPCs:
 ```json
-{"where": {"type": "npc"}}
+{"collection": "actors", "where": {"type": "npc"}}
 ```
 
 Example - Get actors in a specific folder:
 ```json
-{"where": {"folder": "folder_id_here"}}
+{"collection": "actors", "where": {"folder": "folder_id_here"}}
 ```
 
 ### Get Single Document
-Use `get_actor`, `get_item`, `get_journal`, etc. with:
+Use `get_document` with:
+- `collection`: Which collection to read (required)
 - `id` or `_id`: The document's unique identifier
 - `name`: The document's display name
 
@@ -65,7 +68,7 @@ Use `get_actor`, `get_item`, `get_journal`, etc. with:
 **Document schemas vary significantly between game systems** (D&D 5e, Pathfinder 2e, Savage Worlds, etc.). The `system` field contains system-specific data with different structures.
 
 Before creating or modifying documents:
-1. Use `get_*` tools to retrieve an existing document of the same type
+1. Use `get_document` to retrieve an existing document of the same type
 2. Examine its structure, especially the `system` field
 3. Use that structure as a template for your modifications
 
@@ -114,18 +117,18 @@ If multiple Foundry servers are configured:
 3. **Respect permissions**: The server operates under the configured user's permissions
 4. **Be conservative**: Make minimal changes to accomplish the task
 5. **Preserve data**: When updating, only change the specific fields needed
-6. **Handle large worlds**: List tools return summary fields by default; page with `limit`/`offset`, ask for more with `requested_fields`, and fetch one full document with the singular tool
+6. **Handle large worlds**: List tools return summary fields by default; page with `limit`/`offset`, ask for more with `requested_fields`, and fetch one full document with `get_document`
 7. **Understand the system**: Different game systems have different data structures
 
 ## Common Tasks
 
 ### Finding Information
-1. Check `get_journals` for lore and session notes relevant to the user's request
-2. Use `get_actors` with `where` filters to find specific characters
-3. Use `get_folders` to understand the world's organization
+1. Check `get_documents` (`journal`) for lore and session notes relevant to the user's request
+2. Use `get_documents` (`actors`) with `where` filters to find specific characters
+3. Use `get_documents` (`folders`) to understand the world's organization
 
 ### Character Management
-1. Get the actor: `get_actor` with name or id
+1. Get the actor: `get_document` (`actors`) with name or id
 2. Inspect current values in the `system` field
 3. Use `modify_document` with the correct field paths
 
@@ -136,8 +139,8 @@ If multiple Foundry servers are configured:
 
 ### World Navigation
 1. `get_world` for world metadata (title, system, version)
-2. `get_folders` to understand organization
-3. `get_scenes` for available maps/locations
+2. `get_documents` (`folders`) to understand organization
+3. `get_documents` (`scenes`) for available maps/locations
 
 ## Error Handling
 

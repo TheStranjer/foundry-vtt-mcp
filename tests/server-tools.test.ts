@@ -7,10 +7,52 @@ import {
 describe("server tools", () => {
   test("createToolDefinitions includes document tools", () => {
     const tools = createToolDefinitions();
-    const actorList = tools.find((tool) => tool.name === "get_actors");
-    const actorGet = tools.find((tool) => tool.name === "get_actor");
-    expect(actorList).toBeTruthy();
-    expect(actorGet).toBeTruthy();
+    expect(tools.find((tool) => tool.name === "get_documents")).toBeTruthy();
+    expect(tools.find((tool) => tool.name === "get_document")).toBeTruthy();
+  });
+
+  test("the 26 per-collection getters are gone, with no aliases", () => {
+    const names = createToolDefinitions().map((tool) => tool.name);
+    for (const config of DOCUMENT_TYPES) {
+      expect(names).not.toContain(`get_${config.plural}`);
+      expect(names).not.toContain(`get_${config.singular}`);
+    }
+  });
+
+  test("the tool list stays under its byte budget", () => {
+    expect(JSON.stringify(createToolDefinitions()).length).toBeLessThan(12000);
+  });
+
+  test("collection is an enum of the 13 collections on both read tools", () => {
+    const expected = [
+      "actors", "items", "folders", "users", "scenes", "journal", "macros",
+      "cards", "playlists", "tables", "combats", "messages", "settings",
+    ];
+    for (const name of ["get_documents", "get_document"]) {
+      const tool = createToolDefinitions().find((t) => t.name === name) as any;
+      expect([...tool.inputSchema.properties.collection.enum].sort()).toEqual([...expected].sort());
+      expect(tool.inputSchema.required).toEqual(["collection"]);
+    }
+  });
+
+  test("get_documents documents the sort and pack restrictions", () => {
+    const tool = createToolDefinitions().find((t) => t.name === "get_documents") as any;
+    expect(tool.inputSchema.properties.sort.description).toContain("messages only");
+    for (const collection of DOCUMENT_TYPES.filter((c) => c.packable).map((c) => c.collection)) {
+      expect(tool.inputSchema.properties.pack.description).toContain(collection);
+    }
+    for (const collection of DOCUMENT_TYPES.filter((c) => !c.packable).map((c) => c.collection)) {
+      expect(tool.inputSchema.properties.pack.description).not.toContain(collection);
+    }
+  });
+
+  test("modify, create and delete share one short document type line", () => {
+    for (const name of ["modify_document", "create_document", "delete_document"]) {
+      const tool = createToolDefinitions().find((t) => t.name === name) as any;
+      const description = tool.inputSchema.properties.type.description as string;
+      expect(description).not.toContain("Valid types include");
+      expect(description.length).toBeLessThan(200);
+    }
   });
 
   test("createToolDefinitions includes compendium tools", () => {
@@ -42,7 +84,7 @@ describe("server tools", () => {
     } as any;
     const handler = createToolHandler(client);
 
-    const response = await handler({ params: { name: "get_actors" } });
+    const response = await handler({ params: { name: "get_documents", arguments: { collection: "actors" } } });
     expect((response as any).isError).toBe(true);
     expect(client.ensureConnected).toHaveBeenCalled();
   });
@@ -55,7 +97,7 @@ describe("server tools", () => {
     } as any;
     const handler = createToolHandler(client);
 
-    const response = await handler({ params: { name: "get_actors" } });
+    const response = await handler({ params: { name: "get_documents", arguments: { collection: "actors" } } });
     expect((response as any).isError).toBeUndefined();
     expect(client.getDocuments).toHaveBeenCalled();
   });
@@ -69,8 +111,8 @@ describe("server tools", () => {
     const handler = createToolHandler(client);
     const response = await handler({
       params: {
-        name: "get_actors",
-        arguments: { max_length: 5, requested_fields: ["name"], where: { type: "npc" } },
+        name: "get_documents",
+        arguments: { collection: "actors", max_length: 5, requested_fields: ["name"], where: { type: "npc" } },
       },
     });
 
@@ -99,8 +141,8 @@ describe("server tools", () => {
     const handler = createToolHandler(client);
     const response = await handler({
       params: {
-        name: "get_actor",
-        arguments: {
+        name: "get_document",
+        arguments: { collection: "actors",
           name: "Bezaliel",
           requested_fields: ["system.age", "system.aspirations"],
         },
@@ -121,7 +163,7 @@ describe("server tools", () => {
     } as any;
 
     const handler = createToolHandler(client);
-    const response = await handler({ params: { name: "get_actors" } });
+    const response = await handler({ params: { name: "get_documents", arguments: { collection: "actors" } } });
 
     expect((response as any).isError).toBe(true);
     expect(response.content[0].text).toContain("boom");
@@ -133,7 +175,7 @@ describe("server tools", () => {
     } as any;
 
     const handler = createToolHandler(client);
-    const response = await handler({ params: { name: "get_actor", arguments: {} } });
+    const response = await handler({ params: { name: "get_document", arguments: { collection: "actors" } } });
 
     expect((response as any).isError).toBe(true);
   });
@@ -145,7 +187,7 @@ describe("server tools", () => {
     } as any;
 
     const handler = createToolHandler(client);
-    const response = await handler({ params: { name: "get_actor", arguments: { name: "Missing" } } });
+    const response = await handler({ params: { name: "get_document", arguments: { collection: "actors", name: "Missing" } } });
 
     expect((response as any).isError).toBeUndefined();
     expect(response.content[0].text).toContain("not found");
@@ -158,28 +200,90 @@ describe("server tools", () => {
     } as any;
 
     const handler = createToolHandler(client);
-    const response = await handler({ params: { name: "get_actor", arguments: { name: "x" } } });
+    const response = await handler({ params: { name: "get_document", arguments: { collection: "actors", name: "x" } } });
 
     expect((response as any).isError).toBe(true);
   });
 
   describe("compendium reads", () => {
-    test("get tools expose a pack parameter only for document types that can live in a compendium", () => {
-      const tools = createToolDefinitions();
-      const packable = ["actor", "item", "scene", "journal", "macro", "card", "playlist", "table"];
-      const notPackable = ["folder", "user", "combat", "message", "setting"];
+    test("each collection routes to the right world read, and rejects pack unless packable", async () => {
+      for (const config of DOCUMENT_TYPES) {
+        const client = {
+          isConnected: () => true,
+          getDocuments: jest.fn().mockResolvedValue({ documents: [] }),
+          getDocument: jest.fn().mockResolvedValue({ _id: "1" }),
+          getPackDocuments: jest.fn().mockResolvedValue({ documents: [] }),
+          getPackDocument: jest.fn().mockResolvedValue({ _id: "1" }),
+        } as any;
+        const handler = createToolHandler(client);
 
-      for (const singular of packable) {
-        const config = DOCUMENT_TYPES.find((c) => c.singular === singular)!;
-        expect(tools.find((t) => t.name === `get_${config.plural}`)?.inputSchema.properties).toHaveProperty("pack");
-        expect(tools.find((t) => t.name === `get_${config.singular}`)?.inputSchema.properties).toHaveProperty("pack");
-      }
+        await handler({ params: { name: "get_documents", arguments: { collection: config.collection } } });
+        expect(client.getDocuments).toHaveBeenCalledWith(config.collection, expect.any(Object));
+        await handler({ params: { name: "get_document", arguments: { collection: config.collection, name: "x" } } });
+        expect(client.getDocument).toHaveBeenCalledWith(config.collection, { id: undefined, _id: undefined, name: "x" }, expect.any(Object));
+        expect(client.getPackDocuments).not.toHaveBeenCalled();
+        expect(client.getPackDocument).not.toHaveBeenCalled();
 
-      for (const singular of notPackable) {
-        const config = DOCUMENT_TYPES.find((c) => c.singular === singular)!;
-        expect(tools.find((t) => t.name === `get_${config.plural}`)?.inputSchema.properties).not.toHaveProperty("pack");
-        expect(tools.find((t) => t.name === `get_${config.singular}`)?.inputSchema.properties).not.toHaveProperty("pack");
+        const list = await handler({ params: { name: "get_documents", arguments: { collection: config.collection, pack: "w.p" } } });
+        const one = await handler({ params: { name: "get_document", arguments: { collection: config.collection, pack: "w.p", _id: "1" } } });
+        if (config.packable) {
+          expect(client.getPackDocuments).toHaveBeenCalledWith(config.documentName, "w.p", expect.any(Object));
+          expect(client.getPackDocument).toHaveBeenCalledWith(config.documentName, "w.p", expect.any(Object), expect.any(Object));
+          expect((list as any).isError).toBeUndefined();
+          expect((one as any).isError).toBeUndefined();
+        } else {
+          expect((list as any).isError).toBe(true);
+          expect(list.content[0].text).toBe(`Error: ${config.plural} cannot be stored in a compendium`);
+          expect((one as any).isError).toBe(true);
+          expect(client.getPackDocuments).not.toHaveBeenCalled();
+          expect(client.getPackDocument).not.toHaveBeenCalled();
+        }
       }
+    });
+
+    test("an unknown or missing collection is rejected", async () => {
+      const client = { isConnected: () => true, getDocuments: jest.fn(), getDocument: jest.fn() } as any;
+      const handler = createToolHandler(client);
+
+      for (const name of ["get_documents", "get_document"]) {
+        for (const args of [{}, { collection: "dragons", name: "x" }]) {
+          const response = await handler({ params: { name, arguments: args } });
+          expect((response as any).isError).toBe(true);
+          expect(response.content[0].text).toContain("'collection' must be one of");
+        }
+      }
+      expect(client.getDocuments).not.toHaveBeenCalled();
+      expect(client.getDocument).not.toHaveBeenCalled();
+    });
+
+    test("a missing identifier is rejected for every collection", async () => {
+      const client = { isConnected: () => true, getDocument: jest.fn(), getPackDocument: jest.fn() } as any;
+      const handler = createToolHandler(client);
+
+      for (const config of DOCUMENT_TYPES) {
+        const response = await handler({ params: { name: "get_document", arguments: { collection: config.collection } } });
+        expect((response as any).isError).toBe(true);
+        expect(response.content[0].text).toContain("Must provide at least one of: id, _id, or name");
+      }
+      expect(client.getDocument).not.toHaveBeenCalled();
+    });
+
+    test("get_documents passes paging and sort options to the world read", async () => {
+      const client = { isConnected: () => true, getDocuments: jest.fn().mockResolvedValue({}) } as any;
+      await createToolHandler(client)({
+        params: {
+          name: "get_documents",
+          arguments: { collection: "messages", limit: 5, offset: 10, sort: "oldest", max_length: 0, where: { type: 1 } },
+        },
+      });
+      expect(client.getDocuments).toHaveBeenCalledWith("messages", {
+        limit: 5,
+        offset: 10,
+        maxLength: 0,
+        sort: "oldest",
+        requestedFields: null,
+        where: { type: 1 },
+      });
     });
 
     test("createToolDefinitions includes get_compendiums", () => {
@@ -199,8 +303,8 @@ describe("server tools", () => {
       const handler = createToolHandler(client);
       const response = await handler({
         params: {
-          name: "get_items",
-          arguments: {
+          name: "get_documents",
+          arguments: { collection: "items",
             pack: "my-module.items",
             max_length: 5,
             requested_fields: ["name"],
@@ -227,7 +331,7 @@ describe("server tools", () => {
       } as any;
 
       const handler = createToolHandler(client);
-      await handler({ params: { name: "get_items", arguments: {} } });
+      await handler({ params: { name: "get_documents", arguments: { collection: "items" } } });
 
       expect(client.getDocuments).toHaveBeenCalled();
       expect(client.getPackDocuments).not.toHaveBeenCalled();
@@ -240,7 +344,7 @@ describe("server tools", () => {
       } as any;
 
       const handler = createToolHandler(client);
-      await handler({ params: { name: "get_journals", arguments: { pack: "w.notes" } } });
+      await handler({ params: { name: "get_documents", arguments: { collection: "journal", pack: "w.notes" } } });
 
       expect(client.getPackDocuments).toHaveBeenCalledWith("JournalEntry", "w.notes", expect.any(Object));
     });
@@ -249,7 +353,7 @@ describe("server tools", () => {
       const client = { isConnected: () => true, getPackDocuments: jest.fn() } as any;
 
       const handler = createToolHandler(client);
-      const response = await handler({ params: { name: "get_folders", arguments: { pack: "w.x" } } });
+      const response = await handler({ params: { name: "get_documents", arguments: { collection: "folders", pack: "w.x" } } });
 
       expect((response as any).isError).toBe(true);
       expect(response.content[0].text).toContain("cannot be stored in a compendium");
@@ -263,7 +367,7 @@ describe("server tools", () => {
       } as any;
 
       const handler = createToolHandler(client);
-      const response = await handler({ params: { name: "get_items", arguments: { pack: "w.x" } } });
+      const response = await handler({ params: { name: "get_documents", arguments: { collection: "items", pack: "w.x" } } });
 
       expect((response as any).isError).toBe(true);
       expect(response.content[0].text).toContain("not found");
@@ -279,8 +383,8 @@ describe("server tools", () => {
       const handler = createToolHandler(client);
       const response = await handler({
         params: {
-          name: "get_item",
-          arguments: { pack: "my-module.items", _id: "1", requested_fields: ["system.price"] },
+          name: "get_document",
+          arguments: { collection: "items", pack: "my-module.items", _id: "1", requested_fields: ["system.price"] },
         },
       });
 
@@ -302,7 +406,7 @@ describe("server tools", () => {
 
       const handler = createToolHandler(client);
       const response = await handler({
-        params: { name: "get_item", arguments: { pack: "w.items", name: "Missing" } },
+        params: { name: "get_document", arguments: { collection: "items", pack: "w.items", name: "Missing" } },
       });
 
       expect((response as any).isError).toBeUndefined();
@@ -313,7 +417,7 @@ describe("server tools", () => {
       const client = { isConnected: () => true, getPackDocument: jest.fn() } as any;
 
       const handler = createToolHandler(client);
-      const response = await handler({ params: { name: "get_item", arguments: { pack: "w.items" } } });
+      const response = await handler({ params: { name: "get_document", arguments: { collection: "items", pack: "w.items" } } });
 
       expect((response as any).isError).toBe(true);
       expect(client.getPackDocument).not.toHaveBeenCalled();
@@ -324,7 +428,7 @@ describe("server tools", () => {
 
       const handler = createToolHandler(client);
       const response = await handler({
-        params: { name: "get_user", arguments: { pack: "w.x", name: "Gamemaster" } },
+        params: { name: "get_document", arguments: { collection: "users", pack: "w.x", name: "Gamemaster" } },
       });
 
       expect((response as any).isError).toBe(true);

@@ -126,73 +126,47 @@ Or if installed globally:
 
 ## Available Tools
 
-### Document Retrieval (List)
+### Document Retrieval
 
-These tools list the documents of a given type from the connected world, one page at a time.
+Two tools read every collection. `collection` is one of `actors`, `items`, `folders`, `users`, `scenes`, `journal`, `macros`, `cards`, `playlists`, `tables`, `combats`, `messages`, `settings`.
 
-| Tool | Description |
-|------|-------------|
-| `get_actors` | List actors (characters, NPCs, etc.) |
-| `get_items` | List items |
-| `get_folders` | List folders |
-| `get_users` | List users |
-| `get_scenes` | List scenes |
-| `get_journals` | List journal entries |
-| `get_macros` | List macros |
-| `get_cards` | List cards |
-| `get_playlists` | List playlists |
-| `get_tables` | List roll tables |
-| `get_combats` | List combats |
-| `get_messages` | List chat messages |
-| `get_settings` | List settings |
+#### `get_documents`
+
+Lists the documents of a collection from the connected world, one page at a time.
 
 **Response:** `{ total, offset, returned, next_offset, documents }`. `total` is the count after the `where` filter; `next_offset` is the `offset` of the next page, or `null` when nothing is left.
 
 **Parameters:**
+- `collection` (string, required): The collection to list.
 - `limit` (integer, optional): Page size. Defaults to 100, maximum 1000.
 - `offset` (integer, optional): Number of documents to skip. Defaults to 0. Pass `next_offset` from the previous response to read the next page.
-- `max_length` (integer, optional): Byte budget for the page's documents. Defaults to 200000; `0` means no limit. The page is filled in order and stops at the first document that does not fit (`next_offset` points at it). If the page's first document alone exceeds the budget, `documents` is empty and `oversized` (`{ _id, name, bytes }`) names it, with a hint to fetch it using `requested_fields` or the singular tool.
+- `max_length` (integer, optional): Byte budget for the page's documents. Defaults to 200000; `0` means no limit. The page is filled in order and stops at the first document that does not fit (`next_offset` points at it). If the page's first document alone exceeds the budget, `documents` is empty and `oversized` (`{ _id, name, bytes }`) names it, with a hint to fetch it using `requested_fields` or `get_document`.
 - `requested_fields` (string[], optional): Specific fields to include. Supports dot-notation for nested fields (e.g. `system.attributes.hp`). Always includes `_id` and `name`. If omitted or empty, only summary fields are returned: `_id`, `name`, `type`, `folder` by default; `_id`, `timestamp`, `speaker.alias`, `author` for messages; `_id`, `key` for settings; `_id`, `name`, `role` for users. Use `["*"]` for full documents. See [Selecting nested fields](#selecting-nested-fields) below.
-- `sort` (string, optional, `get_messages` only): `"newest"` (default) or `"oldest"`, ordered by `timestamp`.
+- `sort` (string, optional, `messages` only): `"newest"` (default) or `"oldest"`, ordered by `timestamp`.
 - `where` (object, optional): Filter documents by field values. See [Filtering with `where`](#filtering-with-where) below.
-- `pack` (string, optional): Read from a compendium pack instead of the world (e.g. `my-module.items`). Only available on `get_actors`, `get_items`, `get_scenes`, `get_journals`, `get_macros`, `get_cards`, `get_playlists` and `get_tables`, and the pack must hold that document type. Use [`get_compendiums`](#get_compendiums) to find pack IDs. `limit`, `offset`, `max_length`, `requested_fields` and `where` work the same way on compendium results.
+- `pack` (string, optional): Read from a compendium pack instead of the world (e.g. `my-module.items`). Only available for `actors`, `items`, `scenes`, `journal`, `macros`, `cards`, `playlists` and `tables` (other collections are rejected), and the pack must hold that document type. Use [`get_compendiums`](#get_compendiums) to find pack IDs. `limit`, `offset`, `max_length`, `requested_fields` and `where` work the same way on compendium results.
 
-### Document Retrieval (Single)
+#### `get_document`
 
-These tools retrieve a single document by ID or name.
+Retrieves a single document of a collection by ID or name.
 
-| Tool | Description |
-|------|-------------|
-| `get_actor` | Get a specific actor |
-| `get_item` | Get a specific item |
-| `get_folder` | Get a specific folder |
-| `get_user` | Get a specific user |
-| `get_scene` | Get a specific scene |
-| `get_journal` | Get a specific journal entry |
-| `get_macro` | Get a specific macro |
-| `get_card` | Get a specific card |
-| `get_playlist` | Get a specific playlist |
-| `get_table` | Get a specific roll table |
-| `get_combat` | Get a specific combat |
-| `get_message` | Get a specific chat message |
-| `get_setting` | Get a specific setting |
-
-**Parameters (at least one required):**
-- `id` (string): Document ID
+**Parameters:**
+- `collection` (string, required): The collection to read.
+- `id` (string): Document ID. At least one of `id`, `_id` and `name` is required.
 - `_id` (string): Document ID (alias)
 - `name` (string): Document name
 - `requested_fields` (string[], optional): Specific fields to include. Supports dot-notation for nested fields (e.g. `system.attributes.hp`). Always includes `_id` and `name`. If omitted, all fields are returned. See [Selecting nested fields](#selecting-nested-fields) below.
-- `pack` (string, optional): Read the document from a compendium pack instead of the world. Same tools and rules as the list tools above.
+- `pack` (string, optional): Read the document from a compendium pack instead of the world. Same collections and rules as `get_documents`.
 
 ### World Metadata
 
 #### `get_world`
 
-Get world metadata from FoundryVTT (title, system, version, etc.), excluding document collections like actors or items. Use the `get_*` document tools for collection data.
+Get world metadata from FoundryVTT (title, system, version, etc.), excluding document collections like actors or items. Use `get_documents` for collection data.
 
 #### `get_compendiums`
 
-List the compendium packs in the world (`id`, `label`, document `type`, owning package). Pass a pack's `id` as the `pack` parameter of the `get_*` tools to read its documents.
+List the compendium packs in the world (`id`, `label`, document `type`, owning package). Pass a pack's `id` as the `pack` parameter of `get_documents` or `get_document` to read its documents.
 
 **Parameters:**
 - `type` (string, optional): Only list packs holding this document type (e.g. `Item`, `Actor`, `JournalEntry`). Case-insensitive.
@@ -303,11 +277,11 @@ Switch to a different Foundry instance. Disconnects from the current instance (i
 
 ### Understanding Document Structure
 
-Document schemas vary significantly between game systems (D&D 5e, Pathfinder, etc.). Use the `get_*` tools to inspect existing documents before attempting to modify or create new ones.
+Document schemas vary significantly between game systems (D&D 5e, Pathfinder, etc.). Use `get_document` to inspect existing documents before attempting to modify or create new ones.
 
 ### Filtering with `where`
 
-All collection retrieval tools (`get_actors`, `get_items`, etc.) support the `where` parameter for filtering results. The `where` parameter accepts an object with key-value pairs that documents must match.
+`get_documents` supports the `where` parameter for filtering results. The `where` parameter accepts an object with key-value pairs that documents must match.
 
 **How it works:**
 - Each key-value pair in `where` is a condition that must be satisfied
@@ -406,7 +380,7 @@ List tools never return a whole large collection at once. Each response is one p
 }
 ```
 
-`max_length` is a byte budget for the page's documents. The page is filled in order and ends at the first document that does not fit, so a smaller budget gives shorter pages, never missing documents: keep following `next_offset`. If the first document alone is over the budget, you get `documents: []` plus `oversized` (`_id`, `name`, `bytes`) and `next_offset` pointing at that document; fetch it with `requested_fields` or the singular tool, then continue from `offset + 1`. `max_length: 0` removes the budget. Narrowing `requested_fields` shrinks every document, so the two combine well.
+`max_length` is a byte budget for the page's documents. The page is filled in order and ends at the first document that does not fit, so a smaller budget gives shorter pages, never missing documents: keep following `next_offset`. If the first document alone is over the budget, you get `documents: []` plus `oversized` (`_id`, `name`, `bytes`) and `next_offset` pointing at that document; fetch it with `requested_fields` or `get_document`, then continue from `offset + 1`. `max_length: 0` removes the budget. Narrowing `requested_fields` shrinks every document, so the two combine well.
 
 ## How It Works
 
