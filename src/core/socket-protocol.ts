@@ -149,3 +149,56 @@ export function buildModifyDocumentMessage(
 export function buildEmitMessage(ackId: number, event: string, args: unknown[] = []): string {
   return `42${ackId}${JSON.stringify([event, ...args])}`;
 }
+
+const ENGINE_PACKET_NAMES: Record<string, string> = {
+  "0": "engine open",
+  "1": "engine close",
+  "2": "engine ping",
+  "3": "engine pong",
+  "5": "engine upgrade",
+  "6": "engine noop",
+};
+
+const SOCKET_PACKET_NAMES: Record<string, string> = {
+  "0": "socket connect",
+  "1": "socket disconnect",
+  "4": "socket error",
+  "5": "socket binary event",
+  "6": "socket binary ack",
+};
+
+/**
+ * What a frame is, read from its prefix without parsing the body: an event name (with the ack id
+ * when it asks for one), an `ack <id>` reply, or the Engine.IO / Socket.IO packet type.
+ */
+function describeFrame(message: string): string {
+  const event = /^42(\d*)\[("(?:[^"\\]|\\.)*")/.exec(message);
+  if (event) {
+    let name: string;
+    try {
+      name = JSON.parse(event[2]) as string;
+    } catch {
+      name = "event";
+    }
+    return event[1] ? `${name} ack ${event[1]}` : name;
+  }
+
+  const ackId = ackIdOf(message);
+  if (ackId !== null) return `ack ${ackId}`;
+
+  if (message.startsWith("4")) {
+    return SOCKET_PACKET_NAMES[message[1] ?? ""] ?? (message.startsWith("43") ? "ack" : "socket packet");
+  }
+  return ENGINE_PACKET_NAMES[message[0] ?? ""] ?? "unknown packet";
+}
+
+/**
+ * One line for the stderr log: direction (`>>>` outbound, `<<<` inbound), event name or packet
+ * type, ack id when present, and byte length. Never includes the frame body.
+ */
+export function summarizeFrame(direction: "in" | "out", frame: string | Buffer): string {
+  const message = typeof frame === "string" ? frame : frame.toString();
+  const bytes = Buffer.byteLength(message).toLocaleString("en-US");
+  const arrow = direction === "in" ? "<<<" : ">>>";
+  return `${arrow} ${describeFrame(message)} (${bytes} bytes)`;
+}
