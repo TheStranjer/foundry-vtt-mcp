@@ -142,6 +142,72 @@ export interface DocumentPage {
   documents: Record<string, unknown>[];
   oversized?: OversizedDocument;
   hint?: string;
+  /** Present only when total is 0 and a where filter was given: the values that exist per where key. */
+  where_hint?: Record<string, unknown>;
+}
+
+/** Most distinct values listed per where key in a where_hint. */
+export const WHERE_HINT_MAX_VALUES = 20;
+const UNIQUE_PER_DOCUMENT = "unique per document";
+
+function valueAtPath(doc: Record<string, unknown>, path: string): unknown {
+  if (path in doc) {
+    return doc[path];
+  }
+  let source: unknown = doc;
+  for (const segment of path.split(".")) {
+    if (!isPlainObject(source) || !(segment in source)) {
+      return undefined;
+    }
+    source = source[segment];
+  }
+  return source;
+}
+
+/** Strings stay strings; null, booleans and numbers stay JSON values; objects and arrays become JSON text. */
+function hintValue(value: unknown): unknown {
+  return value === null || ["string", "number", "boolean"].includes(typeof value) ? value : JSON.stringify(value);
+}
+
+function compareHintValues(a: unknown, b: unknown): number {
+  const aIsString = typeof a === "string";
+  if (aIsString !== (typeof b === "string")) {
+    return aIsString ? -1 : 1;
+  }
+  const left = aIsString ? (a as string) : JSON.stringify(a);
+  const right = typeof b === "string" ? b : JSON.stringify(b);
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * Explain an empty where result: for each where key, the sorted distinct values found in
+ * `docs` (an index read of the whole collection), cut to WHERE_HINT_MAX_VALUES with a trailing
+ * "+N more". `_id` is reported as "unique per document" instead of listing every id.
+ */
+export function buildWhereHint(
+  docs: Record<string, unknown>[],
+  where: Record<string, unknown>
+): Record<string, unknown> {
+  const hint: Record<string, unknown> = {};
+  for (const key of Object.keys(where)) {
+    if (key === "_id") {
+      hint[key] = UNIQUE_PER_DOCUMENT;
+      continue;
+    }
+    const distinct = new Map<string, unknown>();
+    for (const doc of docs) {
+      const value = valueAtPath(doc, key);
+      if (value !== undefined) {
+        const shown = hintValue(value);
+        distinct.set(JSON.stringify(shown), shown);
+      }
+    }
+    const values = [...distinct.values()].sort(compareHintValues);
+    const listed = values.slice(0, WHERE_HINT_MAX_VALUES);
+    const extra = values.length - listed.length;
+    hint[key] = extra > 0 ? [...listed, `+${extra} more`] : listed;
+  }
+  return hint;
 }
 
 /**

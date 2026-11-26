@@ -17,6 +17,7 @@ import {
   buildPage,
   filterDocumentFields,
   filterDocumentsByWhere,
+  buildWhereHint,
   pageDocuments,
   pickDocument,
   resolvePageParams,
@@ -1249,17 +1250,35 @@ export class FoundryClient {
     const where = options?.where ?? null;
     const sortField = sortFieldForCollection(collection);
 
+    let page: DocumentPage;
     if (sortField) {
-      return this.getSortedPage(collection, sortField, options?.sort ?? "newest", fields, where, params);
+      page = await this.getSortedPage(collection, sortField, options?.sort ?? "newest", fields, where, params);
+    } else {
+      const docs = await this.queryWorldDocuments(
+        collection,
+        whereToServerQuery(where),
+        buildIndexFields(fields, where)
+      );
+      page = pageDocuments(shapeDocuments(docs, { where, requestedFields: fields }), params);
     }
 
-    const docs = await this.queryWorldDocuments(
-      collection,
-      whereToServerQuery(where),
-      buildIndexFields(fields, where)
-    );
+    return this.withWhereHint(page, where, (indexFields) => this.queryWorldDocuments(collection, {}, indexFields));
+  }
 
-    return pageDocuments(shapeDocuments(docs, { where, requestedFields: fields }), params);
+  /**
+   * Add `where_hint` to an empty page that had a where filter: one index request for
+   * `_id` plus the where keys, over the whole collection. Non-empty pages are returned as is.
+   */
+  private async withWhereHint(
+    page: DocumentPage,
+    where: Record<string, unknown> | null,
+    fetchIndex: (indexFields: string[]) => Promise<Record<string, unknown>[]>
+  ): Promise<DocumentPage> {
+    if (page.total !== 0 || !where || Object.keys(where).length === 0) {
+      return page;
+    }
+    const docs = await fetchIndex(["_id", ...Object.keys(where)]);
+    return { ...page, where_hint: buildWhereHint(docs, where) };
   }
 
   /**
@@ -1364,7 +1383,10 @@ export class FoundryClient {
       options?.query ?? {},
       buildIndexFields(requestedFields, where)
     );
-    return pageDocuments(shapeDocuments(docs, { where, requestedFields }), params);
+    const page = pageDocuments(shapeDocuments(docs, { where, requestedFields }), params);
+    return this.withWhereHint(page, where, (indexFields) =>
+      this.fetchPackDocuments(documentName, pack, {}, indexFields)
+    );
   }
 
   /** Raw compendium read; sends an index request when `indexFields` is given. */

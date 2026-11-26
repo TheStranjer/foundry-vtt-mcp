@@ -39,7 +39,7 @@ Use `get_documents` with a `collection` (`actors`, `items`, `folders`, `users`, 
 - `offset`: Documents to skip (default 0); pass `next_offset` from the previous page
 - `max_length`: Byte budget for the page's documents (default 200000; `0` means no limit). The page stops at the first document that doesn't fit. If the first document alone is over the budget, `documents` is empty and `oversized` gives its `_id`, `name` and `bytes`: fetch it with `requested_fields` or `get_document`
 - `requested_fields`: Fields to return (always includes `_id` and `name`). Without it you get only summary fields (`_id`, `name`, `type`, `folder` by default; messages: `_id`, `timestamp`, `speaker.alias`, `author`; settings: `_id`, `key`; users: `_id`, `name`, `role`). Use `["*"]` for full documents
-- `where`: Filter by field values (AND logic)
+- `where`: Filter by field values (AND logic). If nothing matches (`total` 0), the response adds `where_hint`: for each `where` key, the sorted distinct values that exist (at most 20, then `"+N more"`; `_id` is `"unique per document"`), e.g. `{"type": ["Mortal", "Vampire"]}`
 - `pack`: Read from a compendium pack instead of the world; only `actors`, `items`, `scenes`, `journal`, `macros`, `cards`, `playlists` and `tables` can be packed, and the others are rejected
 - `sort` (`messages` only): `"newest"` (default) or `"oldest"`, by `timestamp`
 

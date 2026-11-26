@@ -26,7 +26,7 @@ const packProperty = (restriction: string) => ({
 
 export const getDocumentsTool = {
   name: "get_documents",
-  description: `List documents of a collection, one page at a time. Responds { total, offset, returned, next_offset, documents }: total counts after where, next_offset is the next page's offset (null when done). Documents hold summary fields unless requested_fields is given (["*"] = full). If the page's first document exceeds max_length, documents is empty and oversized gives its _id, name and bytes; fetch it with get_document.`,
+  description: `List documents of a collection, one page at a time. Responds { total, offset, returned, next_offset, documents }: total counts after where (when it is 0, where_hint lists the values that exist per where key), next_offset is the next page's offset (null when done). Documents hold summary fields unless requested_fields is given (["*"] = full). If the page's first document exceeds max_length, documents is empty and oversized gives its _id, name and bytes; fetch it with get_document.`,
   inputSchema: {
     type: "object",
     properties: {

@@ -3,6 +3,7 @@ import {
   DEFAULT_MAX_LENGTH,
   MAX_LIMIT,
   buildPage,
+  buildWhereHint,
   fitToBudget,
   pageDocuments,
   resolvePageParams,
@@ -382,5 +383,114 @@ describe("list tool handler", () => {
     const response = await createToolHandler(client)({ params: { name: "get_documents", arguments: { collection: "messages", sort: "sideways" } } });
     expect((response as any).isError).toBe(true);
     expect(client.getDocuments).not.toHaveBeenCalled();
+  });
+});
+
+describe("where_hint on an empty where result", () => {
+  function mockIndex(client: FoundryClient, all: Record<string, unknown>[]) {
+    return jest.spyOn(client as any, "sendGetRequest").mockImplementation(async (...args: unknown[]) => {
+      const op = args[1] as { query: Record<string, unknown> };
+      const matches = all.filter((doc) => Object.entries(op.query).every(([k, v]) => doc[k] === v));
+      return { result: matches };
+    });
+  }
+
+  const actors = [
+    { _id: "a", type: "Vampire", folder: null },
+    { _id: "b", type: "Mortal", folder: "f1" },
+    { _id: "c", type: "Vampire", folder: "f1" },
+  ];
+
+  test("an empty result gets where_hint with the existing values", async () => {
+    const client = createClient();
+    mockIndex(client, actors);
+    const page = await client.getDocuments("actors", { where: { type: "character" } });
+    expect(page.total).toBe(0);
+    expect(page.where_hint).toEqual({ type: ["Mortal", "Vampire"] });
+  });
+
+  test("non-string values are shown as JSON values", async () => {
+    const client = createClient();
+    mockIndex(client, actors);
+    const page = await client.getDocuments("actors", { where: { folder: "nope", type: "x" } });
+    expect(page.where_hint!.folder).toEqual(["f1", null]);
+  });
+
+  test("a non-empty result has no where_hint and costs no extra request", async () => {
+    const client = createClient();
+    const send = mockIndex(client, actors);
+    const page = await client.getDocuments("actors", { where: { type: "Vampire" } });
+    expect(page.total).toBe(2);
+    expect(page).not.toHaveProperty("where_hint");
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  test("an empty result without where has no where_hint", async () => {
+    const client = createClient();
+    mockIndex(client, []);
+    expect(await client.getDocuments("actors")).not.toHaveProperty("where_hint");
+  });
+
+  test("the hint costs exactly one extra index request for _id plus the where keys", async () => {
+    const client = createClient();
+    const send = mockIndex(client, actors);
+    await client.getDocuments("actors", { where: { type: "character", "system.x": 1 } });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls[1][1]).toMatchObject({
+      index: true,
+      indexFields: ["_id", "type", "system.x"],
+      query: {},
+    });
+  });
+
+  test("compendium reads get the hint too, with one extra request", async () => {
+    const client = createClient();
+    jest.spyOn(client as any, "loadWorldSnapshot").mockResolvedValue({ packs: [{ id: "w.p", type: "Actor", label: "P" }] });
+    const send = mockIndex(client, actors);
+    const page = await client.getPackDocuments("Actor", "w.p", { where: { type: "character" } });
+    expect(page.where_hint).toEqual({ type: ["Mortal", "Vampire"] });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls[1][1]).toMatchObject({ pack: "w.p", index: true, indexFields: ["_id", "type"], query: {} });
+  });
+});
+
+describe("buildWhereHint", () => {
+  test("caps each list at 20 sorted values with a +N more count", () => {
+    const docs = Array.from({ length: 34 }, (_, i) => ({ _id: `d${i}`, folder: `f${String(i).padStart(2, "0")}` }));
+    const list = buildWhereHint(docs.reverse(), { folder: "x" }).folder as string[];
+    expect(list).toHaveLength(21);
+    expect(list[0]).toBe("f00");
+    expect(list[19]).toBe("f19");
+    expect(list[20]).toBe("+14 more");
+  });
+
+  test("exactly 20 values have no +N more", () => {
+    const docs = Array.from({ length: 20 }, (_, i) => ({ _id: `d${i}`, n: i }));
+    expect(buildWhereHint(docs, { n: 1 }).n as unknown[]).toHaveLength(20);
+  });
+
+  test("dotted keys read nested values, and duplicates collapse", () => {
+    const docs = [
+      { _id: "a", system: { clan: "Ventrue" } },
+      { _id: "b", system: { clan: "Brujah" } },
+      { _id: "c", system: { clan: "Ventrue" } },
+      { _id: "d" },
+    ];
+    expect(buildWhereHint(docs, { "system.clan": "x" })).toEqual({ "system.clan": ["Brujah", "Ventrue"] });
+  });
+
+  test("dotted keys also work when the index returns them flat", () => {
+    expect(buildWhereHint([{ _id: "a", "system.clan": "Gangrel" }], { "system.clan": "x" })).toEqual({
+      "system.clan": ["Gangrel"],
+    });
+  });
+
+  test("_id is reported as unique per document instead of listing ids", () => {
+    expect(buildWhereHint([{ _id: "a" }, { _id: "b" }], { _id: "z" })).toEqual({ _id: "unique per document" });
+  });
+
+  test("numbers and booleans stay JSON values, strings sort first", () => {
+    const docs = [{ _id: "a", v: true }, { _id: "b", v: 2 }, { _id: "c", v: "s" }, { _id: "d", v: null }];
+    expect(buildWhereHint(docs, { v: 0 }).v).toEqual(["s", 2, null, true]);
   });
 });
